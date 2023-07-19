@@ -15,3 +15,8 @@ A Natural Language model was run using the 1750 passages previously used for the
 <br>CAUSE:  0.797
 <br>ACTION: 0.794
 <br> For a quick demo of the model see  the online repository for the model <a href="https://huggingface.co/Chantland/HRAF_MultiLabel"> here! </a>
+
+
+## Multiple Label With Subclass 7/19/2023
+This is a demo model with all of the main classes (“EVENT”, “CAUSE”, “ACTION” using the reverse coded column “No_Info”) and all the 15 subclasses. The model was trained and validated using 1746 passages (1396 for training, 350 for validation). This number is 4 off from the previous version as a Ngram decoder found 4 instances of passages which appeared to be subsets of other passages (e.g. “I played in the forest” is the subset of “John fetched some water. I played in the forest”). The model achieved a micro F1 score of .79 for its validation set which is “okay” approaching “good”. However, since the validation set is used to train the model, it is not an unbiased representation of success. Instead using a test set of 140 passages which were completely new and untested. We achieved a micro F1 score of .68 which is worse but decidedly still “okay”. However, this low score is likely due to the small testing set which does not give many chances to approximate towards the true f1 score (some subclasses don’t even have a single true positive) and is exasperated by the fact that many of the subclasses are extremely negatively biased. 
+<br> For a quick demo of the model see the online repository for the model <a href="https://huggingface.co/Chantland/HRAF_Multilabel_SubClasses"> here! </a>
