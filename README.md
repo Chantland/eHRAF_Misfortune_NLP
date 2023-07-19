@@ -10,7 +10,7 @@ A Natural language model was run using 1750 passages prelabled by research assis
 
 
 ## Multiple Label 7/11/2023
-A Natural Language model was run using the 1750 passages previously used for the single label run. These passages had labels for EVENT, CAUSE, and ACTION which indicate the presence of a misfortunate event, a cause for the misfortune, and an action relating to the remedy or reaction to a misfortunate event. Otherwise, everything is identical to the single run (see above for more details). Using a multiplable text classification, the model achieved an evaluation micro f1 score of .898 on the validation set. Running the model on a completely separate test set of 140 passages achieved a F1 score of .835 macro and .838 micro F1 score. Note that macro F1 scores are good for inbalanced classes while micro is better for balanced. Individual F1 scores per labels were 
+A Natural Language model was run using the 1750 passages previously used for the single label run. These passages had labels for EVENT, CAUSE, and ACTION which indicate the presence of a misfortunate event, a cause for the misfortune, and an action relating to the remedy or reaction to a misfortunate event. Otherwise, everything is identical to the single run (see above for more details). Using a multi-lable text classification, the model achieved an evaluation micro f1 score of .898 on the validation set. Running the model on a completely separate test set of 140 passages achieved an F1 score of .835 macro and .838 micro F1 score. Note that macro F1 scores are good for balanced classes while micro is better for unbalanced such as ours. Individual F1 scores per label were 
 <br>EVENT:  0.914
 <br>CAUSE:  0.797
 <br>ACTION: 0.794
