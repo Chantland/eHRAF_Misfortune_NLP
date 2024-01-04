@@ -22,5 +22,10 @@ This is a demo model with all of the main classes (“EVENT”, “CAUSE”, “
 <br> For a quick demo of the model see the online repository for the model <a href="https://huggingface.co/Chantland/HRAF_Multilabel_SubClasses"> here! </a>
 
 ## Multiple Label 12/01/2023
-This is a demo using the new dataset which was less skewed towards containing misfortune. This model adds the addition to k-folds cross-validation to improve model performance but potentially may be overfitting. Regardless, only the main categories were used like in "Multiple Label" version. At time of writing, this model has NOT been added to the GitHub repository. 
+This is a demo using the new dataset which was less skewed towards containing misfortune. This model adds the addition to k-folds cross-validation to improve model performance but potentially may be overfitting. Regardless, only the main categories were used like in "Multiple Label" version. <br>
+The current F1 micro score of
+750 passages not used for training is .816. individual class f1 scores shown below.
+<br>EVENT:  0.883
+<br>CAUSE:  0.812
+<br>ACTION: 0.733
 <br> For a quick demo of the model see  the online repository for the model <a href="https://huggingface.co/Chantland/Hraf_Multilabel_K-foldsCrossValDemo"> here! </a>
