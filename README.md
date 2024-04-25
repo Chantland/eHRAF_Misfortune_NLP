@@ -29,3 +29,18 @@ The current F1 micro score of
 <br>CAUSE:  0.812
 <br>ACTION: 0.733
 <br> For a quick demo of the model see  the online repository for the model <a href="https://huggingface.co/Chantland/Hraf_Multilabel_K-foldsCrossValDemo"> here! </a>
+
+
+## Multiple Label 1/13/2024
+Due to our original dataset being heavily biased, we searched via our eHRAF scraper various subjects that are still interesting to us but are not directly biased towards misfortune. Additionally, we changed the run #1 (Sickness only dataset) by replacing “Jealousy Evil Eye” to “Other” in order to not only have the missing “other” category which was missed, but to also match with run #2 (Sickness plus Non-sickness  dataset) columns. Additionally, “evil eye” was not a common coding to begin with. 
+We trained with 4340 passages via a kfold of 5.
+F1 micro score of 1085 passages not used for training was .865.
+<br> For a quick demo of the model see  the online repository for the model <a href="https://huggingface.co/Chantland/Hraf_Multilabel_K-foldsCrossValDemo"> here! </a>
+
+## Multiple Label  Additional training 4/02/2024
+Additional training added to model via adding more passages to present model rather than starting from scratch. We trained with 7277 passages via a kfold of 5.
+F1 micro score of 1085 passages not used for training was .851.
+<br>EVENT: 0.907
+<br>CAUSE: 0.822
+<br>ACTION: 0.805
+<br> For a quick demo of the model see  the online repository for the model <a href="https://huggingface.co/Chantland/Hraf_Multilabel_K-foldsCrossValDemo"> here! </a>
