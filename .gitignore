@@ -1,10 +1,14 @@
 **/.DS_Store
 
 *HRAF_Model*
-Model*
+Model*/
+# !main/subfolder2/
+
 RA_Cleaning/RA_Progress.xlsx
 Demo_IMDB/.DS_Store
 _*
 Datasets
 Lilja Lexical Search
 Lilja_Ngrams
+/ChatGPT_Model
+/NLP Predictions Analysis
