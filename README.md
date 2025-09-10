@@ -1,8 +1,8 @@
 # eHRAF_Misfortune_NLP
- Natural language processing to mimic the coding of research assistants for misfortune related coding. See HRAF_NLP folder for all models.
-- For look into how the model was trained, use HRAF_Training.ipynb (note the difference between singleLabel and multiLabel training sets)
-- For basic inference see HRAF_Inference.ipynb. (note the difference between singleLabel and multiLabel training sets)
-- For N-gram exploration consider checking out the N-gram Exploration folder. 
+ Natural language processing to mimic the coding of research assistants for misfortune-related coding. See HRAF_NLP folder for all models.
+- For a look into how models were trained, see HRAF_Training.ipynb within each of the model folders. Note that the model we currently use for analysis and is the current definitive model is within the HRAF_MultiLabel_SubClasses_Kfolds, and can be sourced through Hugging Face here <a href="https://huggingface.co/Chantland/HRAF_Multilabel_SubClasses"> here </a>
+- For basic inference, see HRAF_Inference.ipynb
+- For N-gram exploration, consider checking out the N-gram Exploration folder. 
 
 ## Single label 6/01/2023
 A Natural language model was run using 1750 passages prelabled by research assistants using the "No_Info" column for events which depicts if an event is present or not. 1400 passages from Culture_Coding_old.xlsx were used to train and 350 passages were used for validation. Each was coded by a research assistant and given a label. 110 training Passages were truncated to 512 tokens so there may be some inaccuracies in the model's training based on labels. Nonetheless, the same 1750 passages were refed into the model for inference and received an F1 score of .97. F1 scores take the harmonic mean of precision (which is sensitive to false positives) and recall (which is sensitive to false negatives). A score of .5 or higher is considered “ok” and a score of .9 or higher is considered “very good”. Our F1 score was extremely good but this is to be expected as these passages were the ones being trained on in the first place. Nonetheless, feeding in 140 completely new test passaged gave an F1 score of .94, still very good! For a quick demo of the model see  the online repository for the model <a href="https://huggingface.co/Chantland/HRAF_Event_Demo"> here! </a>
@@ -44,3 +44,67 @@ F1 micro score of 1085 passages not used for training was .851.
 <br>CAUSE: 0.822
 <br>ACTION: 0.805
 <br> For a quick demo of the model see  the online repository for the model <a href="https://huggingface.co/Chantland/Hraf_Multilabel_K-foldsCrossValDemo"> here! </a>
+
+## Multiple label Subclasses - Training and parameter testing 5/16/2024
+We trained a series of multi-label classification models to detect 12 labels indicating the EVENT, CAUSE, and ACTION of misfortune (reduced from the original of 15), but removing the higher order labels (general presence of EVENT, CAUSE, and ACTION) as we wanted to detect specific labels. This was seen as our end goal, thus an accurate model would allow us to find co-occurance with specific themes of misfortune and how they were managed by individual cultures, thus giving greater understanding for how cultures ascribe misfortune; a task infeasible by hand given the large amount of data in anthropological datasets. 
+<br>
+We tuned hyperparameters like weight decay, dropout, learning rate, batch, as well as investigating the best transformer model to train on. As a result, we increased our F1 score from .2 to .66 while also improving per-label accuracy. We used a training set of 6634 human-coded passages, 1659 passages for the validation set, and 2074 for the test set. The most promising model transformed off roBERTa based and achieved the following F1 scores per label: 
+  <li>EVENT:  -
+    <ul>
+      <li>
+        Illness:  .876
+      </li>
+      <li>
+        Accident:  .458
+      </li>
+      <li>
+        Other:  .588
+      </li>
+    </ul>
+  </li>
+  <li>CAUSE:  -
+    <ul>
+      <li>
+        Just Happens:  -
+      </li>
+      <li>
+        Material Physical:  .476
+      </li>
+      <li>
+        Spirits and Gods:  .728
+      </li>
+      <li>
+        Witchcraft and Sorcery:  .651
+      </li>
+      <li>
+        Rule Violation Taboo:  .517
+      </li>
+      <li>
+        Jealous Evil Eye:  -
+      </li>
+    </ul>
+  </li>
+  <li>ACTION:  -
+    <ul>
+      <li>
+        Physical Material:  .672
+      </li>
+      <li>
+        Technical Specialist:  .5
+      </li>
+      <li>
+        Divination:  .406
+      </li>
+      <li>
+        Shaman Medium Healer:  .582
+      </li>
+      <li>
+        Priest High Religion:  .375
+      </li>
+      <li>
+        Other:  -
+      </li>
+    </ul>
+  </li>
+<br>
+Please see model scripts within the Github folder HRAF_MultiLabel_SubClasses_Kfolds, model can be downloaded  <a href="https://huggingface.co/Chantland/HRAF_Multilabel_SubClasses"> here </a>
