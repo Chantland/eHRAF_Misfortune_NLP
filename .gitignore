@@ -1,7 +1,7 @@
 **/.DS_Store
 
-*HRAF_Model*
-Model*/
+# *HRAF_Model*
+# Model*/
 # !main/subfolder2/
 
 RA_Cleaning/RA_Progress.xlsx
