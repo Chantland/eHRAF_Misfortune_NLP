@@ -1,11 +1,11 @@
 # eHRAF_Misfortune_NLP
 ## Info
 Cataloged here are transformer-based Natural Language processing Models that attempt to determine the prevalence of certain types of misfortunate EVENTS, the types of CAUSES for the misfortune, and the types of remedies or preventative ACTIONS. Importantly, there may be more than one misfortune occurring, as well as multiple causes and actions. We want to determine if certain misfortunes are explained as being the result of particular causes (like a stomach ache caused by spirits), and with this co-occurrence, do cultures recruit particular specialists to resolve or prevent these misfortunes?<br><br>
-Our current model, described below in the history section <b>Multiple label Subclasses - Training and parameter testing 5/16/2024</b>, is a multi-label sequence classification model leveraging roBERTa transformer model to predict 12 labels.<br>
+Our current model, described below in the history section <b>Multiple label Subclasses - Training and parameter testing 5/16/2024</b>, is a multi-label sequence classification model leveraging roBERTa transformer model to predict 12 labels, achieving a F1 Micro score of .66<br>
 See section below for more info<br><br>
 
 Additional info about this repository:
-- Current definitive model "HRAF_Multilabel_SubClasses" found here <a href="https://github.com/Chantland/eHRAF_Misfortune_NLP/tree/main/HRAF_NLP/HRAF_MultiLabel_SubClasses_Kfolds"> HRAF_NLP/HRAF_MultiLabel_SubClasses_Kfolds </a>. This model predicts 
+- Current definitive model "HRAF_Multilabel_SubClasses" can be found here <a href="https://github.com/Chantland/eHRAF_Misfortune_NLP/tree/main/HRAF_NLP/HRAF_MultiLabel_SubClasses_Kfolds"> HRAF_NLP/HRAF_MultiLabel_SubClasses_Kfolds </a> specifically in the Model_5_Roberta folder which uses the roBERTa transformer. You may find roberta model tensors, config, etc. <a href="https://github.com/Chantland/eHRAF_Misfortune_NLP/tree/main/HRAF_NLP/HRAF_MultiLabel_SubClasses_Kfolds/Model_5_Roberta/Learning_Rate_2e-05_Weight_Decay_0.01_fold_1"> here </a>. Alternatively, the distilBERT based model (Model_3_distilbert) can be found <a href="https://github.com/Chantland/eHRAF_Misfortune_NLP/tree/main/HRAF_NLP/HRAF_MultiLabel_SubClasses_Kfolds/Model_3_DistilBERT/Learning_Rate_2e-05_fold_1"> here </a>, but it is notably not currently the best model.
 - For a look into how models were trained, see HRAF_Training.ipynb within each of the model folders. Model Inference testing for each model uses "HRAF_Inference.ipynb" files
 - For a simple model using N-grams and Lexical search, see the Lexical Search and N-gram Exploration folders.
 - Hierarchical model can be found in this repository, but it likely has issues, so it should not be used as a definitive version.
@@ -51,7 +51,7 @@ F1 micro score of 1085 passages not used for training was .851.
 <br>EVENT: 0.907
 <br>CAUSE: 0.822
 <br>ACTION: 0.805
-<br> For model <a href="https://huggingface.co/Chantland/Hraf_Multilabel_K-foldsCrossValDemo"> here! </a>
+<br> For model see the online repository for the model <a href="https://huggingface.co/Chantland/Hraf_Multilabel_K-foldsCrossValDemo"> here. </a>
 
 ### Multiple label Subclasses - Training and parameter testing 5/16/2024
 We trained a series of multi-label classification models to detect 12 labels indicating the EVENT, CAUSE, and ACTION of misfortune (reduced from the original of 15), but removing the higher order labels (general presence of EVENT, CAUSE, and ACTION) as we wanted to detect specific labels. This was seen as our end goal, thus an accurate model would allow us to find co-occurance with specific themes of misfortune and how they were managed by individual cultures, thus giving greater understanding for how cultures ascribe misfortune; a task infeasible by hand given the large amount of data in anthropological datasets. 
