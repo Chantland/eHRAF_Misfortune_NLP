@@ -58,7 +58,7 @@ print(f"Using device: {device}")
 # -------------------------------------------------------------------------
 EXPERIMENT_CONFIG = {
     # Change this name for each experiment to save results separately
-    "experiment_name": "Test for Huggingface registry",  # e.g., "focal_loss_test", "no_gating", "lower_threshold"
+    "experiment_name": "roberta_focal_loss_gated",  # e.g., "focal_loss_test", "no_gating", "lower_threshold"
 
     # Automatically generate name based on key settings
     "auto_name": False,  # If True, will auto-generate name from settings
@@ -166,7 +166,7 @@ TRAINING_CONFIG = {
 # DATA PARAMETERS
 # -------------------------------------------------------------------------
 DATA_CONFIG = {
-    "excel_path": "_test_dataset.xlsx", # source of training data
+    "excel_path": "_Altogether_Dataset_RACoded_Combined.xlsx", # source of training data
     "test_size": 0.2, # percentage of data set reserved for final testing
     "validation_size": 0.1,  # percentage of data used to stop training and detect overfitting
     "random_seed": 42, # the answer to the ultimate question of life, the universe, and everything - Don't Change This!
@@ -1264,7 +1264,7 @@ loaded_tokenizer = AutoTokenizer.from_pretrained(final_model_path)
 print("✅ Model successfully loaded using AutoModel!")
 #%%
 # ============================================================================
-# CELL 19: QUICK INFERENCE FUNCTION
+# CELL 19: QUICK INFERENCE FUNCTION (FIXED)
 # ============================================================================
 
 def predict_passage(text, model, tokenizer, label_names, thresholds=None):
@@ -1312,11 +1312,12 @@ def predict_passage(text, model, tokenizer, label_names, thresholds=None):
     return predictions, prob_dict
 
 # Test the inference function
+# FIX: Use loaded_model instead of model (which was deleted in Cell 18)
 test_text = "He broke his leg after crossing into the forbidden forest and being cursed by the forest spirits. His leg wouldn't heal, until he finally went to the local shaman and performed the healing ritual."
 predictions, probabilities = predict_passage(
     test_text,
-    model,
-    tokenizer,
+    loaded_model,  # Changed from 'model' to 'loaded_model'
+    loaded_tokenizer,  # Changed from 'tokenizer' to 'loaded_tokenizer' for consistency
     label_columns,
     optimal_thresholds
 )
