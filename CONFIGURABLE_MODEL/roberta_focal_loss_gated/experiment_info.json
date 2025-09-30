@@ -1,0 +1,71 @@
+{
+  "experiment_name": "roberta_focal_loss_gated",
+  "auto_generated_name": false,
+  "output_dir": "./results/roberta_focal_loss_gated",
+  "timestamp": "2025-09-29T20:47:42.697682",
+  "config": {
+    "base_model": "roberta-base",
+    "use_hierarchy": true,
+    "gated_hierarchy": true,
+    "gate_threshold": 0.3,
+    "hidden_size": 768,
+    "hierarchical_hidden_size": 265,
+    "num_hidden_layers": 2,
+    "dropout": 0.2,
+    "attention_dropout": 0.1,
+    "use_weighted_loss": false,
+    "use_focal_loss": true,
+    "focal_gamma": 2.5,
+    "teacher_forcing_ratio": 0.7
+  },
+  "training_config": {
+    "num_epochs": 15,
+    "batch_size": 16,
+    "gradient_accumulation_steps": 1,
+    "learning_rate": 2e-05,
+    "warmup_steps": 500,
+    "weight_decay": 0.01,
+    "max_length": 512,
+    "eval_steps": 100,
+    "save_steps": 500,
+    "logging_steps": 50,
+    "early_stopping_patience": 3,
+    "label_smoothing": 0.1
+  },
+  "data_config": {
+    "excel_path": "_Altogether_Dataset_RACoded_Combined.xlsx",
+    "test_size": 0.2,
+    "validation_size": 0.1,
+    "random_seed": 42,
+    "stratify_by": "EVENT"
+  },
+  "label_structure": {
+    "EVENT": {
+      "main_label": "EVENT",
+      "sublabels": [
+        "EVENT_Illness",
+        "EVENT_Accident"
+      ],
+      "enabled": true
+    },
+    "CAUSE": {
+      "main_label": "CAUSE",
+      "sublabels": [
+        "CAUSE_Material_Physical",
+        "CAUSE_Spirits_Gods",
+        "CAUSE_Witchcraft_Sorcery",
+        "CAUSE_Rule_Violation_Taboo"
+      ],
+      "enabled": true
+    },
+    "ACTION": {
+      "main_label": "ACTION",
+      "sublabels": [
+        "ACTION_Physical_Material",
+        "ACTION_Technical_Specialist",
+        "ACTION_Shaman_Medium_Healer"
+      ],
+      "enabled": true
+    }
+  }
+}
