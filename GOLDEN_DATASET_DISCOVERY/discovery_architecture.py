@@ -1,10 +1,12 @@
 """
 Golden Dataset Identification for HRAF Misfortune Classification
-Author: John Heinz
-Date: September 2024
 
 Uses VoyageAI embeddings (voyage-3-large) and reranker (rerank-2.5)
 with Pinecone vector storage to identify high-confidence training passages.
+
+Requirements:
+- pinecone>=7.0.0
+- voyageai>=0.2.0
 """
 
 import voyageai
@@ -92,9 +94,9 @@ class GoldenDatasetFinder:
         self._setup_index()
 
     def _setup_index(self):
-        """Create or connect to Pinecone index"""
-        # Check if index exists
-        existing_indexes = [idx['name'] for idx in self.pc.list_indexes()]
+        """Create or connect to Pinecone index using v7 API"""
+        # Check if index exists - list_indexes() returns objects with .name attribute
+        existing_indexes = [idx.name for idx in self.pc.list_indexes()]
 
         if self.index_name not in existing_indexes:
             print(f"Creating new Pinecone index: {self.index_name}")
@@ -107,15 +109,21 @@ class GoldenDatasetFinder:
                     region=self.region
                 )
             )
-            # Wait for index to be ready
-            while not self.pc.describe_index(self.index_name).status['ready']:
+            # Wait for index to be ready - describe_index returns object with .status attribute
+            while True:
+                status = self.pc.describe_index(self.index_name).status
+                if hasattr(status, 'ready') and status.ready:
+                    break
+                elif isinstance(status, dict) and status.get('ready'):
+                    break
                 time.sleep(1)
             print("✅ Index created successfully")
         else:
             print(f"Connected to existing index: {self.index_name}")
 
-        # Connect to index
-        self.index = self.pc.Index(self.index_name)
+        # Connect to index - requires host parameter in v6+
+        index_info = self.pc.describe_index(self.index_name)
+        self.index = self.pc.Index(name=self.index_name, host=index_info.host)
 
     def _generate_passage_id(self, text: str) -> str:
         """Generate consistent ID from passage text"""
@@ -143,8 +151,6 @@ class GoldenDatasetFinder:
                         label_columns.append(col)
 
         return label_columns
-        """Generate consistent ID from passage text"""
-        return hashlib.md5(text.encode()).hexdigest()[:16]
 
     def embed_and_store_passages(self,
                                  df: pd.DataFrame,
@@ -250,7 +256,9 @@ class GoldenDatasetFinder:
 
         # Verify
         stats = self.index.describe_index_stats()
-        print(f"✅ Stored {stats.get('total_vector_count', 0)} vectors")
+        # stats is a dict in v7
+        total_vectors = stats.get('total_vector_count', 0) if isinstance(stats, dict) else stats.total_vector_count
+        print(f"✅ Stored {total_vectors} vectors")
 
         return passage_id_map
 
@@ -273,16 +281,17 @@ class GoldenDatasetFinder:
         """
         query_id = f"passage_{query_idx}"
 
-        # Fetch query vector
+        # Fetch query vector - returns dict in v7
         fetch_result = self.index.fetch(ids=[query_id], namespace=namespace)
 
-        # Handle new Pinecone API - access as attribute not dict
-        if not hasattr(fetch_result, 'vectors') or query_id not in fetch_result.vectors:
+        # Check if vectors exist in response
+        if 'vectors' not in fetch_result or query_id not in fetch_result['vectors']:
             raise ValueError(f"Passage {query_idx} not found in index")
 
-        query_vector = fetch_result.vectors[query_id].values
+        # Extract vector values from dict
+        query_vector = fetch_result['vectors'][query_id]['values']
 
-        # Search for similar vectors
+        # Search for similar vectors - returns dict in v7
         search_results = self.index.query(
             vector=query_vector,
             top_k=k + (1 if exclude_self else 0),
@@ -290,16 +299,16 @@ class GoldenDatasetFinder:
             include_metadata=True
         )
 
-        # Process results
+        # Process results - matches is a list of dicts
         similar_passages = []
-        for match in search_results.matches:
-            if exclude_self and match.id == query_id:
+        for match in search_results['matches']:
+            if exclude_self and match['id'] == query_id:
                 continue
 
             similar_passages.append({
-                'passage_idx': match.metadata['passage_idx'],
-                'similarity': match.score,
-                'metadata': match.metadata
+                'passage_idx': match['metadata']['passage_idx'],
+                'similarity': match['score'],
+                'metadata': match['metadata']
             })
 
         return similar_passages[:k]
@@ -316,19 +325,20 @@ class GoldenDatasetFinder:
         """
         consistency = {}
 
-        # Get query labels from Pinecone
+        # Get query labels from Pinecone - returns dict in v7
         query_id = f"passage_{query_idx}"
         fetch_result = self.index.fetch(ids=[query_id], namespace=namespace)
 
-        # Handle new Pinecone API
-        if not hasattr(fetch_result, 'vectors') or query_id not in fetch_result.vectors:
+        # Check if vectors exist
+        if 'vectors' not in fetch_result or query_id not in fetch_result['vectors']:
             # If passage not found, return 0 consistency for all labels
             return {label: 0.0 for label in label_columns}
 
-        query_vector_data = fetch_result.vectors[query_id]
+        # Extract metadata from dict
+        query_metadata = fetch_result['vectors'][query_id].get('metadata', {})
         query_labels = {}
         for label in label_columns:
-            query_labels[label] = query_vector_data.metadata.get(f'label_{label}', 0)
+            query_labels[label] = query_metadata.get(f'label_{label}', 0)
 
         # Calculate agreement with similar passages
         for label in label_columns:
@@ -436,11 +446,9 @@ class GoldenDatasetFinder:
                 label_columns=label_columns,
                 namespace=namespace
             )
-            # Track which passages were actually embedded
             embedded_indices = list(passage_id_map.keys())
         else:
             print("\n📊 Step 1: Using existing embeddings from Pinecone")
-            # Assume all valid passages are embedded
             valid_mask = df[passage_column].notna()
             embedded_indices = df[valid_mask].index.tolist()
 
@@ -448,7 +456,7 @@ class GoldenDatasetFinder:
 
         # Step 2: Calculate consistency scores
         print("\n🔍 Step 2: Calculating label consistency from similar passages...")
-        consistency_scores = {}  # Use dict to map indices to scores
+        consistency_scores = {}
 
         for idx in tqdm(embedded_indices, desc="Checking consistency"):
             try:
@@ -487,7 +495,6 @@ class GoldenDatasetFinder:
         passages = df[passage_column].tolist()
 
         for label in tqdm(label_columns, desc="Reranking labels"):
-            # Only rerank passages with this label that were embedded
             label_mask = df[label] == 1
             label_indices = [idx for idx in embedded_indices if idx in df.index and df.loc[idx, label] == 1]
             label_passages = [passages[idx] for idx in label_indices]
@@ -495,7 +502,6 @@ class GoldenDatasetFinder:
             if label_passages:
                 scores = self.rerank_passages_for_label(label_passages, label)
 
-                # Map scores back to indices
                 for idx, score in zip(label_indices, scores):
                     rerank_scores[label][idx] = score
 
@@ -504,17 +510,13 @@ class GoldenDatasetFinder:
 
         golden_candidates = []
         for idx in embedded_indices:
-            # Get active labels for this passage
             active_labels = [label for label in label_columns
                              if idx in df.index and df.loc[idx, label] == 1]
 
             if not active_labels:
                 continue
 
-            # Calculate composite score
             consistency_score = consistency_scores.get(idx, 0.0)
-
-            # Get average rerank score for active labels
             rerank_values = [rerank_scores[label].get(idx, 0.0) for label in active_labels]
             avg_rerank = np.mean(rerank_values) if rerank_values else 0.0
 
@@ -538,7 +540,6 @@ class GoldenDatasetFinder:
             print(
                 f"\n⚠️  No passages met the criteria (consistency >= {min_consistency}, rerank >= {min_rerank_score})")
             print("   Consider lowering thresholds or checking data quality")
-            # Return empty dataframe with expected columns
             return pd.DataFrame(
                 columns=list(df.columns) + ['confidence_consistency', 'confidence_rerank', 'confidence_composite'])
 
@@ -564,8 +565,8 @@ class GoldenDatasetFinder:
 if __name__ == "__main__":
     # Initialize
     finder = GoldenDatasetFinder(
-        voyage_api_key="YOUR_VOYAGE_API_KEY",
-        pinecone_api_key="YOUR_PINECONE_API_KEY",
+        voyage_api_key=os.getenv("VOYAGE_API_KEY"),
+        pinecone_api_key=os.getenv("PINECONE_API_KEY"),
         index_name="hraf-misfortune",
         cloud="aws",
         region="us-east-1"
@@ -577,11 +578,11 @@ if __name__ == "__main__":
     # Identify golden dataset
     golden_df = finder.identify_golden_dataset(
         df=df,
-        passage_column='Passage',  # Note: capital P
+        passage_column='Passage',
         min_consistency=0.7,
         min_rerank_score=0.6,
-        target_size=200,  # For 360 passage sample
-        recompute_embeddings=True  # First run
+        target_size=200,
+        recompute_embeddings=True
     )
 
     # Save results
