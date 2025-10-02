@@ -152,6 +152,25 @@ class GoldenDatasetFinder:
 
         return label_columns
 
+    def _get_vectors_from_fetch(self, fetch_result):
+        """
+        Extract vectors dict from FetchResponse object (Pinecone v7+)
+
+        Handles both dict-like access and attribute access
+        """
+        # Try attribute access first (v7+)
+        if hasattr(fetch_result, 'vectors'):
+            return fetch_result.vectors or {}
+        # Fall back to dict-like access
+        elif isinstance(fetch_result, dict):
+            return fetch_result.get('vectors', {})
+        # Try to get as dict
+        else:
+            try:
+                return dict(fetch_result).get('vectors', {})
+            except:
+                return {}
+
     def embed_and_store_passages(self,
                                  df: pd.DataFrame,
                                  passage_column: str = 'Passage',
@@ -256,8 +275,11 @@ class GoldenDatasetFinder:
 
         # Verify
         stats = self.index.describe_index_stats()
-        # stats is a dict in v7
-        total_vectors = stats.get('total_vector_count', 0) if isinstance(stats, dict) else stats.total_vector_count
+        # Handle both dict and object responses
+        if hasattr(stats, 'total_vector_count'):
+            total_vectors = stats.total_vector_count
+        else:
+            total_vectors = stats.get('total_vector_count', 0) if isinstance(stats, dict) else 0
         print(f"✅ Stored {total_vectors} vectors")
 
         return passage_id_map
@@ -281,17 +303,26 @@ class GoldenDatasetFinder:
         """
         query_id = f"passage_{query_idx}"
 
-        # Fetch query vector - returns dict in v7
+        # Fetch query vector
         fetch_result = self.index.fetch(ids=[query_id], namespace=namespace)
 
-        # Check if vectors exist in response
-        if 'vectors' not in fetch_result or query_id not in fetch_result['vectors']:
+        # Extract vectors using helper method
+        vectors_dict = self._get_vectors_from_fetch(fetch_result)
+
+        # Check if query vector exists
+        if query_id not in vectors_dict:
             raise ValueError(f"Passage {query_idx} not found in index")
 
-        # Extract vector values from dict
-        query_vector = fetch_result['vectors'][query_id]['values']
+        # Extract vector values - handle both dict and object
+        vector_data = vectors_dict[query_id]
+        if hasattr(vector_data, 'values'):
+            query_vector = vector_data.values
+        elif isinstance(vector_data, dict):
+            query_vector = vector_data['values']
+        else:
+            query_vector = vector_data
 
-        # Search for similar vectors - returns dict in v7
+        # Search for similar vectors
         search_results = self.index.query(
             vector=query_vector,
             top_k=k + (1 if exclude_self else 0),
@@ -299,16 +330,34 @@ class GoldenDatasetFinder:
             include_metadata=True
         )
 
-        # Process results - matches is a list of dicts
+        # Extract matches - handle both dict and object responses
+        if hasattr(search_results, 'matches'):
+            matches = search_results.matches
+        elif isinstance(search_results, dict):
+            matches = search_results.get('matches', [])
+        else:
+            matches = []
+
+        # Process results
         similar_passages = []
-        for match in search_results['matches']:
-            if exclude_self and match['id'] == query_id:
+        for match in matches:
+            # Handle both dict and object match format
+            if hasattr(match, 'id'):
+                match_id = match.id
+                match_score = match.score
+                match_metadata = match.metadata
+            else:
+                match_id = match['id']
+                match_score = match['score']
+                match_metadata = match['metadata']
+
+            if exclude_self and match_id == query_id:
                 continue
 
             similar_passages.append({
-                'passage_idx': match['metadata']['passage_idx'],
-                'similarity': match['score'],
-                'metadata': match['metadata']
+                'passage_idx': match_metadata['passage_idx'],
+                'similarity': match_score,
+                'metadata': match_metadata
             })
 
         return similar_passages[:k]
@@ -325,17 +374,28 @@ class GoldenDatasetFinder:
         """
         consistency = {}
 
-        # Get query labels from Pinecone - returns dict in v7
+        # Get query labels from Pinecone
         query_id = f"passage_{query_idx}"
         fetch_result = self.index.fetch(ids=[query_id], namespace=namespace)
 
-        # Check if vectors exist
-        if 'vectors' not in fetch_result or query_id not in fetch_result['vectors']:
+        # Extract vectors using helper method
+        vectors_dict = self._get_vectors_from_fetch(fetch_result)
+
+        # Check if passage exists
+        if query_id not in vectors_dict:
             # If passage not found, return 0 consistency for all labels
             return {label: 0.0 for label in label_columns}
 
-        # Extract metadata from dict
-        query_metadata = fetch_result['vectors'][query_id].get('metadata', {})
+        # Extract metadata - handle both dict and object
+        vector_data = vectors_dict[query_id]
+        if hasattr(vector_data, 'metadata'):
+            query_metadata = vector_data.metadata or {}
+        elif isinstance(vector_data, dict):
+            query_metadata = vector_data.get('metadata', {})
+        else:
+            query_metadata = {}
+
+        # Get query labels
         query_labels = {}
         for label in label_columns:
             query_labels[label] = query_metadata.get(f'label_{label}', 0)
