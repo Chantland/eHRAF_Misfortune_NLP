@@ -7,6 +7,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from model_inference import HRAFModelLoader
+from chat_assistant import render_chat_page
 import seaborn as sns
 import os
 import pickle
@@ -1160,13 +1162,14 @@ else:
 
     # Use session state for current page if set, otherwise default
     if st.session_state.current_page:
-        default_index = ["📊 Overview", "💻 Compute Scores", "🔍 Search", "⚙️ Thresholds", "📦 Tiers", "🤖 Model Inference", "💾 Export"].index(st.session_state.current_page)
+        default_index = ["📊 Overview", "💻 Compute Scores", "🔍 Search", "⚙️ Thresholds", "📦 Tiers", "🤖 Model Inference", "💬 Chat", "💾 Export"].index(st.session_state.current_page)
     else:
         default_index = 0
 
     page = st.radio(
         "Navigate",
-        ["📊 Overview", "💻 Compute Scores", "🔍 Search", "⚙️ Thresholds", "📦 Tiers", "🤖 Model Inference", "💾 Export"],
+        ["📊 Overview", "💻 Compute Scores", "🔍 Search", "⚙️ Thresholds", "📦 Tiers", "🤖 Model Inference", "💬 Chat",
+         "💾 Export"],
         horizontal=True,
         label_visibility="visible",
         index=default_index
@@ -2015,6 +2018,9 @@ else:
                         for k, v in result['probabilities'].items()
                     ]).sort_values('Probability', ascending=False)
                     st.dataframe(prob_df, use_container_width=True, hide_index=True)
+
+    elif page == "💬 Chat":
+        render_chat_page(st.session_state)
 
     elif page == "💾 Export":
         st.markdown("## 💾 Export Results")
