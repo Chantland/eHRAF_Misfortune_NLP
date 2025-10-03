@@ -284,6 +284,258 @@ class GoldenDatasetFinder:
 
         return passage_id_map
 
+    def search_with_filters(
+            self,
+            query: str,
+            namespace: str = "main",
+            label_filter: Optional[str] = None,
+            top_k_vector: int = 100,
+            top_k_rerank: int = 10,
+            rerank_instruction: Optional[str] = None,
+            min_similarity: float = 0.0
+    ) -> List[Dict]:
+        """
+        Enhanced search using vector search + optional reranking + metadata filters
+
+        Strategy:
+        1. Use Pinecone vector search to get top_k_vector candidates (fast, free)
+        2. Apply metadata filters in Pinecone
+        3. Optionally rerank the smaller set with instruction-following
+
+        Args:
+            query: Search query text
+            namespace: Pinecone namespace
+            label_filter: Optional label to filter by (e.g., "Illness")
+            top_k_vector: Number of candidates from vector search
+            top_k_rerank: Number of final results after reranking
+            rerank_instruction: Optional instruction for reranker guidance
+            min_similarity: Minimum similarity threshold
+
+        Returns:
+            List of search results with scores and metadata
+        """
+        # Step 1: Generate query embedding
+        query_result = self.voyage.embed(
+            texts=[query],
+            model="voyage-3-large",
+            input_type="query"
+        )
+        query_vector = query_result.embeddings[0]
+
+        # Step 2: Build metadata filter if needed
+        filter_dict = None
+        if label_filter:
+            filter_dict = {f"label_{label_filter}": {"$eq": 1}}
+
+        # Step 3: Vector search in Pinecone
+        search_results = self.index.query(
+            vector=query_vector,
+            top_k=top_k_vector,
+            namespace=namespace,
+            include_metadata=True,
+            filter=filter_dict
+        )
+
+        # Handle both dict and object responses
+        if hasattr(search_results, 'matches'):
+            matches = search_results.matches
+        else:
+            matches = search_results.get('matches', [])
+
+        # Filter by minimum similarity
+        candidates = []
+        for match in matches:
+            if hasattr(match, 'score'):
+                score = match.score
+                metadata = match.metadata
+                match_id = match.id
+            else:
+                score = match['score']
+                metadata = match['metadata']
+                match_id = match['id']
+
+            if score >= min_similarity:
+                candidates.append({
+                    'id': match_id,
+                    'passage_idx': metadata['passage_idx'],
+                    'vector_score': score,
+                    'text_preview': metadata.get('text_preview', ''),
+                    'metadata': metadata
+                })
+
+        if not candidates:
+            return []
+
+        # Step 4: Optional reranking with instruction-following
+        if top_k_rerank < len(candidates):
+            # Extract texts for reranking
+            texts = [c['text_preview'] for c in candidates]
+
+            # Build query with optional instruction
+            rerank_query = query
+            if rerank_instruction:
+                rerank_query = f"{rerank_instruction}\n\nQuery: {query}"
+
+            # Rerank with instruction-following
+            try:
+                rerank_result = self.voyage.rerank(
+                    query=rerank_query,
+                    documents=texts,
+                    model="rerank-2.5",
+                    top_k=top_k_rerank
+                )
+
+                # Combine vector and rerank scores
+                final_results = []
+                for result in rerank_result.results:
+                    candidate = candidates[result.index]
+                    final_results.append({
+                        'passage_idx': candidate['passage_idx'],
+                        'vector_score': candidate['vector_score'],
+                        'rerank_score': result.relevance_score,
+                        'combined_score': 0.3 * candidate['vector_score'] + 0.7 * result.relevance_score,
+                        'text_preview': candidate['text_preview'],
+                        'metadata': candidate['metadata']
+                    })
+
+                # Sort by combined score
+                final_results.sort(key=lambda x: x['combined_score'], reverse=True)
+                return final_results
+
+            except Exception as e:
+                print(f"Reranking failed: {e}")
+                print("Falling back to vector search results only")
+                # Fall back to vector-only results
+                return candidates[:top_k_rerank]
+
+        else:
+            # No reranking needed, return vector results
+            return candidates
+
+    def search_similar_to_passage(
+            self,
+            passage_idx: int,
+            namespace: str = "main",
+            k: int = 20,
+            label_filter: Optional[str] = None,
+            exclude_self: bool = True
+    ) -> List[Dict]:
+        """
+        Find passages similar to a given passage using vector similarity
+
+        This is more efficient than reranking for "find similar" queries
+        since it uses only Pinecone vector search (no API cost)
+
+        Args:
+            passage_idx: Index of query passage
+            namespace: Pinecone namespace
+            k: Number of results
+            label_filter: Optional label to filter by
+            exclude_self: Whether to exclude query passage
+
+        Returns:
+            List of similar passages
+        """
+        query_id = f"passage_{passage_idx}"
+
+        # Fetch query vector
+        fetch_result = self.index.fetch(ids=[query_id], namespace=namespace)
+        vectors_dict = self._get_vectors_from_fetch(fetch_result)
+
+        if query_id not in vectors_dict:
+            raise ValueError(f"Passage {passage_idx} not found in index")
+
+        # Extract vector
+        vector_data = vectors_dict[query_id]
+        if hasattr(vector_data, 'values'):
+            query_vector = vector_data.values
+        else:
+            query_vector = vector_data['values']
+
+        # Build filter
+        filter_dict = None
+        if label_filter:
+            filter_dict = {f"label_{label_filter}": {"$eq": 1}}
+
+        # Search
+        search_results = self.index.query(
+            vector=query_vector,
+            top_k=k + (1 if exclude_self else 0),
+            namespace=namespace,
+            include_metadata=True,
+            filter=filter_dict
+        )
+
+        # Process results
+        if hasattr(search_results, 'matches'):
+            matches = search_results.matches
+        else:
+            matches = search_results.get('matches', [])
+
+        similar = []
+        for match in matches:
+            if hasattr(match, 'id'):
+                match_id = match.id
+                score = match.score
+                metadata = match.metadata
+            else:
+                match_id = match['id']
+                score = match['score']
+                metadata = match['metadata']
+
+            if exclude_self and match_id == query_id:
+                continue
+
+            similar.append({
+                'passage_idx': metadata['passage_idx'],
+                'similarity': score,
+                'metadata': metadata
+            })
+
+        return similar[:k]
+
+    def search_by_label_semantic(
+            self,
+            label: str,
+            namespace: str = "main",
+            top_k_vector: int = 50,
+            top_k_rerank: int = 10
+    ) -> List[Dict]:
+        """
+        Find passages most relevant to a label's semantic meaning
+
+        Uses the label's semantic description as a query and reranks
+        with instruction-following for best results
+
+        Args:
+            label: Label name (e.g., "Illness", "Spirits_Gods")
+            namespace: Pinecone namespace
+            top_k_vector: Vector search candidates
+            top_k_rerank: Final reranked results
+
+        Returns:
+            List of most semantically relevant passages
+        """
+        if label not in self.LABEL_QUERIES:
+            raise ValueError(f"Unknown label: {label}")
+
+        query = self.LABEL_QUERIES[label]
+
+        # Build instruction for reranker
+        instruction = (
+            f"Prioritize passages that clearly demonstrate or describe {label}. "
+            f"Focus on explicit mentions and detailed descriptions rather than vague references."
+        )
+
+        return self.search_with_filters(
+            query=query,
+            namespace=namespace,
+            label_filter=label,  # Only search passages with this label
+            top_k_vector=top_k_vector,
+            top_k_rerank=top_k_rerank,
+            rerank_instruction=instruction
+        )
+
     def find_similar_passages(self,
                               query_idx: int,
                               k: int = 20,

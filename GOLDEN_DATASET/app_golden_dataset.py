@@ -501,6 +501,455 @@ def create_tiered_datasets(df, scores_df, label_columns, tier1_cons, tier1_reran
     return tier1_df, tier2_df, inference_df
 
 
+def _render_search_results(results, df, passage_col, label_columns, cache, namespace, finder):
+    """Helper function to render search results with model inference"""
+
+    # Load model if available
+    model_loaded = (
+            st.session_state.get('model_loader') is not None and
+            st.session_state.model_loader.is_loaded()
+    )
+
+    # Batch inference option
+    if model_loaded and len(results) > 1:
+        st.markdown("---")
+        col1, col2, col3 = st.columns([2, 2, 2])
+
+        with col1:
+            if st.button("🤖 Run Inference on All Results", type="primary", key="batch_inference"):
+                st.session_state.run_batch_inference = True
+                st.rerun()
+
+        with col2:
+            if st.session_state.get('batch_inference_results'):
+                if st.button("📊 Show Batch Summary", type="secondary"):
+                    _show_batch_summary(st.session_state.batch_inference_results, label_columns)
+
+        with col3:
+            if st.session_state.get('batch_inference_results'):
+                if st.button("🗑️ Clear Batch Results", type="secondary"):
+                    st.session_state.batch_inference_results = None
+                    st.session_state.run_batch_inference = False
+                    st.rerun()
+
+        st.markdown("---")
+
+    # Run batch inference if triggered
+    if st.session_state.get('run_batch_inference'):
+        with st.spinner(f"Running inference on {len(results)} passages..."):
+            batch_results = _run_batch_inference(results, df, passage_col, label_columns)
+            st.session_state.batch_inference_results = batch_results
+            st.session_state.run_batch_inference = False
+            st.success(f"✅ Completed inference on {len(results)} passages!")
+            st.rerun()
+
+    for i, result in enumerate(results, 1):
+        idx = result['passage_idx']
+
+        # Build score display
+        score_parts = []
+        if 'vector_score' in result:
+            score_parts.append(f"Vector: {result['vector_score']:.3f}")
+        if 'rerank_score' in result:
+            score_parts.append(f"Rerank: {result['rerank_score']:.3f}")
+        if 'combined_score' in result:
+            score_parts.append(f"Combined: {result['combined_score']:.3f}")
+
+        score_str = " | ".join(score_parts)
+
+        # Get confidence if available
+        confidence_str = ""
+        if cache:
+            scores_df = cache['df_summary']
+            if idx in scores_df['passage_idx'].values:
+                score_row = scores_df[scores_df['passage_idx'] == idx].iloc[0]
+                conf = (score_row['consistency_avg'] + score_row['rerank_avg']) / 2
+                confidence_str = f" | Quality: {conf:.3f}"
+
+        # Get passage text
+        text = df.loc[idx, passage_col] if idx in df.index else "N/A"
+        if pd.isna(text):
+            text = "N/A"
+
+        # Get labels
+        active_labels = [l for l in label_columns if idx in df.index and df.loc[idx, l] == 1]
+
+        with st.expander(f"#{i} - Passage {idx} | {score_str}{confidence_str}"):
+            st.markdown(f"**Labels:** {', '.join(active_labels) if active_labels else 'None'}")
+            st.markdown("---")
+
+            # Show text
+            preview_length = 1500
+            if len(text) > preview_length:
+                st.write(text[:preview_length] + "...")
+                with st.expander("Show full text"):
+                    st.write(text)
+            else:
+                st.write(text)
+
+            st.markdown("---")
+
+            # Action buttons
+            col1, col2, col3 = st.columns([2, 2, 1])
+
+            with col1:
+                # Store intent to search similar, but don't execute here
+                if st.button("🔍 Find Similar", key=f"similar_{idx}_{i}"):
+                    st.info(f"💡 To find similar passages: Go to 'Similar to Passage' mode and enter index {idx}")
+
+            with col2:
+                if model_loaded:
+                    # Check if batch inference has been run
+                    batch_results = st.session_state.get('batch_inference_results', {})
+                    has_batch_result = idx in batch_results
+
+                    # Use checkbox to show inference
+                    show_inference = st.checkbox(
+                        "Show Inference",
+                        key=f"show_infer_{idx}_{i}",
+                        value=has_batch_result  # Auto-show if batch was run
+                    )
+
+            # Show inference results if checkbox is checked
+            if model_loaded and st.session_state.get(f"show_infer_{idx}_{i}", False):
+                st.markdown("---")
+
+                # Use batch result if available, otherwise run inference
+                batch_results = st.session_state.get('batch_inference_results', {})
+                if idx in batch_results:
+                    _display_inference_result(
+                        batch_results[idx]['result'],
+                        batch_results[idx]['actual_labels'],
+                        label_columns
+                    )
+                else:
+                    _run_inference_on_passage(idx, text, active_labels, label_columns)
+
+            with col3:
+                # Copy button using clipboard
+                if st.button("📋", key=f"copy_{idx}_{i}", help="Copy text"):
+                    st.code(text, language=None)
+
+
+def _run_inference_on_passage(idx, text, actual_labels_list, label_columns):
+    """Run model inference and compare to actual labels"""
+
+    if not st.session_state.model_loader.is_loaded():
+        st.warning("No model loaded")
+        return
+
+    with st.spinner("Running inference..."):
+        try:
+            result = st.session_state.model_loader.predict_passage(text)
+
+            # Build actual labels dict - need to map between different naming conventions
+            df = st.session_state.df
+            actual_labels_dict = _build_actual_labels_dict(idx, df, label_columns, result['probabilities'].keys())
+
+            _display_inference_result(result, actual_labels_dict, label_columns)
+
+        except Exception as e:
+            st.error(f"Inference error: {e}")
+            import traceback
+            with st.expander("Error details"):
+                st.code(traceback.format_exc())
+
+
+def _build_actual_labels_dict(idx, df, label_columns, model_labels):
+    """
+    Build actual labels dict with proper name mapping between model and dataframe
+
+    Model uses: EVENT, ACTION_Shaman_Medium_Healer, etc.
+    DataFrame might use: Illness, Shaman_Medium_Healer, etc.
+    """
+    actual_labels = {}
+
+    # First pass: Get all labels from dataframe
+    df_labels = {}
+    for col in label_columns:
+        if col in df.columns and idx in df.index:
+            val = df.loc[idx, col]
+            if pd.notna(val):
+                df_labels[col] = int(val)
+
+    # Second pass: Map to model label names
+    for model_label in model_labels:
+        found = False
+
+        # Try exact match first
+        if model_label in df_labels:
+            actual_labels[model_label] = df_labels[model_label]
+            found = True
+
+        # Try without prefix (ACTION_Shaman -> Shaman_Medium_Healer)
+        if not found and '_' in model_label:
+            parts = model_label.split('_', 1)
+            if len(parts) > 1:
+                suffix = parts[1]
+                if suffix in df_labels:
+                    actual_labels[model_label] = df_labels[suffix]
+                    found = True
+
+        # For main categories (EVENT, CAUSE, ACTION), infer from sublabels
+        if not found and model_label in ['EVENT', 'CAUSE', 'ACTION']:
+            # Check if any sublabel is present
+            has_sublabel = False
+
+            if model_label == 'EVENT':
+                sublabels = ['Illness', 'Accident', 'Other']
+            elif model_label == 'CAUSE':
+                sublabels = ['Just_Happens', 'Material_Physical', 'Spirits_Gods',
+                             'Witchcraft_Sorcery', 'Rule_Violation_Taboo', 'Other.1']
+            elif model_label == 'ACTION':
+                sublabels = ['Physical_Material', 'Technical_Specialist', 'Divination',
+                             'Shaman_Medium_Healer', 'Priest_High_Religion', 'Other.2']
+            else:
+                sublabels = []
+
+            for sublabel in sublabels:
+                if sublabel in df_labels and df_labels[sublabel] == 1:
+                    has_sublabel = True
+                    break
+
+            actual_labels[model_label] = 1 if has_sublabel else 0
+            found = True
+
+        # Default to 0 if not found
+        if not found:
+            actual_labels[model_label] = 0
+
+    return actual_labels
+
+
+def _display_inference_result(result, actual_labels_dict, label_columns):
+    """Display inference results with comparison to actual labels"""
+
+    st.markdown("#### 🤖 Model Predictions")
+
+    # Get comparison
+    from model_inference import compare_predictions_to_labels
+    comparison = compare_predictions_to_labels(result['predictions'], actual_labels_dict)
+
+    # Build comparison table
+    comparison_data = []
+    for label in sorted(result['probabilities'].keys()):
+        pred_prob = result['probabilities'][label]
+        is_predicted = label in result['predicted_labels']
+        pred_str = f"✓ {pred_prob:.2f}" if is_predicted else f"  {pred_prob:.2f}"
+
+        # Get actual value
+        actual_val = actual_labels_dict.get(label, 0)
+        actual_str = "✓" if actual_val == 1 else "—"
+
+        # Get comparison
+        comp = comparison.get(label, "")
+        if "True Positive" in comp:
+            comp_str = "✓ Match"
+            comp_color = "🟢"
+        elif "True Negative" in comp:
+            comp_str = "✓ Match"
+            comp_color = "⚪"
+        elif "False Positive" in comp:
+            comp_str = "✗ Over-predicted"
+            comp_color = "🔴"
+        elif "False Negative" in comp:
+            comp_str = "✗ Missed"
+            comp_color = "🟡"
+        else:
+            comp_str = "—"
+            comp_color = ""
+
+        comparison_data.append({
+            'Label': label,
+            'Predicted': pred_str,
+            'Actual': actual_str,
+            'Result': f"{comp_color} {comp_str}".strip()
+        })
+
+    st.dataframe(
+        pd.DataFrame(comparison_data),
+        hide_index=True,
+        use_container_width=True
+    )
+
+    # Summary stats
+    tp = sum(1 for c in comparison.values() if "True Positive" in c)
+    tn = sum(1 for c in comparison.values() if "True Negative" in c)
+    fp = sum(1 for c in comparison.values() if "False Positive" in c)
+    fn = sum(1 for c in comparison.values() if "False Negative" in c)
+
+    # Explanation of metrics
+    with st.expander("📊 What do these metrics mean?"):
+        st.markdown("""
+        **Confusion Matrix Metrics:**
+
+        - **TP (True Positive)**: Model predicted ✓ AND actual was ✓ → **Correct positive** 🟢
+        - **TN (True Negative)**: Model predicted — AND actual was — → **Correct negative** ⚪
+        - **FP (False Positive)**: Model predicted ✓ BUT actual was — → **Over-predicted** 🔴
+        - **FN (False Negative)**: Model predicted — BUT actual was ✓ → **Missed** 🟡
+
+        **Good model indicators:**
+        - High TP and TN (correctly identifying both positive and negative cases)
+        - Low FP and FN (few mistakes)
+        """)
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("🟢 TP", tp, help="True Positives: Correctly predicted positive")
+    with col2:
+        st.metric("⚪ TN", tn, help="True Negatives: Correctly predicted negative")
+    with col3:
+        st.metric("🔴 FP", fp, help="False Positives: Incorrectly predicted positive")
+    with col4:
+        st.metric("🟡 FN", fn, help="False Negatives: Missed actual positives")
+
+
+def _run_batch_inference(results, df, passage_col, label_columns):
+    """Run inference on all search results"""
+    batch_results = {}
+
+    for result in results:
+        idx = result['passage_idx']
+
+        if idx not in df.index:
+            continue
+
+        text = df.loc[idx, passage_col]
+        if pd.isna(text) or not isinstance(text, str):
+            continue
+
+        try:
+            # Run inference
+            inference_result = st.session_state.model_loader.predict_passage(text)
+
+            # Build actual labels
+            actual_labels_dict = _build_actual_labels_dict(
+                idx, df, label_columns,
+                inference_result['probabilities'].keys()
+            )
+
+            batch_results[idx] = {
+                'result': inference_result,
+                'actual_labels': actual_labels_dict
+            }
+
+        except Exception as e:
+            print(f"Error on passage {idx}: {e}")
+            continue
+
+    return batch_results
+
+
+def _show_batch_summary(batch_results, label_columns):
+    """Show summary statistics across all batch inference results"""
+    st.markdown("### 📊 Batch Inference Summary")
+
+    from model_inference import compare_predictions_to_labels
+
+    # Aggregate metrics across all passages
+    total_tp = 0
+    total_tn = 0
+    total_fp = 0
+    total_fn = 0
+
+    label_stats = {}
+
+    for idx, data in batch_results.items():
+        result = data['result']
+        actual_labels = data['actual_labels']
+
+        comparison = compare_predictions_to_labels(result['predictions'], actual_labels)
+
+        tp = sum(1 for c in comparison.values() if "True Positive" in c)
+        tn = sum(1 for c in comparison.values() if "True Negative" in c)
+        fp = sum(1 for c in comparison.values() if "False Positive" in c)
+        fn = sum(1 for c in comparison.values() if "False Negative" in c)
+
+        total_tp += tp
+        total_tn += tn
+        total_fp += fp
+        total_fn += fn
+
+        # Per-label stats
+        for label, comp in comparison.items():
+            if label not in label_stats:
+                label_stats[label] = {'tp': 0, 'tn': 0, 'fp': 0, 'fn': 0}
+
+            if "True Positive" in comp:
+                label_stats[label]['tp'] += 1
+            elif "True Negative" in comp:
+                label_stats[label]['tn'] += 1
+            elif "False Positive" in comp:
+                label_stats[label]['fp'] += 1
+            elif "False Negative" in comp:
+                label_stats[label]['fn'] += 1
+
+    # Overall metrics
+    st.markdown("#### Overall Performance")
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("🟢 Total TP", total_tp)
+    with col2:
+        st.metric("⚪ Total TN", total_tn)
+    with col3:
+        st.metric("🔴 Total FP", total_fp)
+    with col4:
+        st.metric("🟡 Total FN", total_fn)
+
+    # Calculate overall metrics
+    total_predictions = total_tp + total_tn + total_fp + total_fn
+    if total_predictions > 0:
+        accuracy = (total_tp + total_tn) / total_predictions
+        if (total_tp + total_fp) > 0:
+            precision = total_tp / (total_tp + total_fp)
+        else:
+            precision = 0
+        if (total_tp + total_fn) > 0:
+            recall = total_tp / (total_tp + total_fn)
+        else:
+            recall = 0
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Accuracy", f"{accuracy:.3f}")
+        with col2:
+            st.metric("Precision", f"{precision:.3f}")
+        with col3:
+            st.metric("Recall", f"{recall:.3f}")
+
+    # Per-label breakdown
+    st.markdown("#### Per-Label Performance")
+
+    label_breakdown = []
+    for label, stats in sorted(label_stats.items()):
+        tp = stats['tp']
+        tn = stats['tn']
+        fp = stats['fp']
+        fn = stats['fn']
+
+        total = tp + tn + fp + fn
+        if total > 0:
+            acc = (tp + tn) / total
+        else:
+            acc = 0
+
+        label_breakdown.append({
+            'Label': label,
+            'TP': tp,
+            'TN': tn,
+            'FP': fp,
+            'FN': fn,
+            'Accuracy': f"{acc:.3f}"
+        })
+
+    st.dataframe(
+        pd.DataFrame(label_breakdown),
+        hide_index=True,
+        use_container_width=True
+    )
+
+
 # ============================================================================
 # SIDEBAR
 # ============================================================================
@@ -901,48 +1350,490 @@ else:
                     st.warning("⚠️ Step 1 (Embeddings) may need to be completed")
 
     elif page == "🔍 Search":
-        st.markdown("## 🔍 Search Passages")
+
+        st.markdown("## 🔍 Enhanced Search")
 
         df = st.session_state.df
+
         passage_col = st.session_state.get('passage_col', 'Passage')
+
         label_columns = st.session_state.label_columns
+
         cache = st.session_state.cache
 
-        query = st.text_input("Search query:", placeholder="e.g., shamans healing illness")
-        top_k = st.number_input("Results:", 5, 50, 10)
+        finder = st.session_state.finder
 
-        if st.button("Search", type="primary"):
-            if query:
+        namespace = st.session_state.get('namespace', 'main')
+
+        st.markdown("""
+        
+            **Search Strategy:**
+        
+            1. **Vector Search** - Fast Pinecone similarity search (100+ candidates)
+        
+            2. **Reranking** - Precise VoyageAI rerank on top results 
+        
+            3. **Instruction-Following** - Guide reranker with natural language instructions
+        
+            """)
+
+        # Search mode selection
+
+        search_mode = st.radio(
+
+            "Search mode:",
+
+            ["📝 Text Query", "🔍 Similar to Passage", "🏷️ Label Semantic Search"],
+
+            horizontal=True,
+
+            key="search_mode_radio"
+
+        )
+
+        # Clear results when changing modes
+
+        if 'last_search_mode' not in st.session_state:
+            st.session_state.last_search_mode = search_mode
+
+        if st.session_state.last_search_mode != search_mode:
+            st.session_state.search_results = None
+
+            st.session_state.search_mode = None
+
+            st.session_state.last_search_mode = search_mode
+
+        # Add clear results button
+
+        if st.session_state.get('search_results'):
+
+            if st.button("🗑️ Clear Results", type="secondary"):
+                st.session_state.search_results = None
+
+                st.session_state.search_mode = None
+
+                st.rerun()
+
+        st.markdown("---")
+
+        # ========================================================================
+
+        # MODE 1: Text Query
+
+        # ========================================================================
+
+        if search_mode == "📝 Text Query":
+
+            st.markdown("### 📝 Search by Text Query")
+
+            query = st.text_input(
+
+                "Search query:",
+
+                placeholder="e.g., shamans healing illness with spirits",
+
+                key="text_query"
+
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                label_filter = st.selectbox(
+
+                    "Filter by label (optional):",
+
+                    ["None"] + label_columns,
+
+                    key="label_filter"
+
+                )
+
+                label_filter = None if label_filter == "None" else label_filter
+
+            with col2:
+
+                top_k_results = st.number_input(
+
+                    "Number of results:",
+
+                    min_value=1,
+
+                    max_value=50,
+
+                    value=10,
+
+                    key="top_k_results"
+
+                )
+
+            with st.expander("⚙️ Advanced Options"):
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+
+                    top_k_vector = st.slider(
+
+                        "Vector search candidates:",
+
+                        min_value=10,
+
+                        max_value=200,
+
+                        value=100,
+
+                        help="More candidates = better recall but slower"
+
+                    )
+
+                    min_similarity = st.slider(
+
+                        "Minimum similarity:",
+
+                        min_value=0.0,
+
+                        max_value=1.0,
+
+                        value=0.3,
+
+                        step=0.05
+
+                    )
+
+                with col2:
+
+                    use_rerank = st.checkbox("Use reranking", value=True)
+
+                    if use_rerank:
+
+                        instruction = st.text_area(
+
+                            "Reranker instruction (optional):",
+
+                            placeholder="e.g., Prioritize passages with detailed descriptions",
+
+                            height=100,
+
+                            help="Guide the reranker with natural language instructions"
+
+                        )
+
+                    else:
+
+                        instruction = None
+
+            if st.button("🔍 Search", type="primary", key="search_text"):
+
+                if not query:
+
+                    st.warning("Please enter a search query")
+
+                else:
+
+                    with st.spinner("Searching..."):
+
+                        try:
+
+                            results = finder.search_with_filters(
+
+                                query=query,
+
+                                namespace=namespace,
+
+                                label_filter=label_filter,
+
+                                top_k_vector=top_k_vector,
+
+                                top_k_rerank=top_k_results if use_rerank else len(df),
+
+                                rerank_instruction=instruction if use_rerank else None,
+
+                                min_similarity=min_similarity
+
+                            )
+
+                            if not results:
+
+                                st.warning("No results found. Try lowering the similarity threshold or removing filters.")
+
+                                st.session_state.search_results = None
+
+                            else:
+
+                                st.success(f"Found {len(results)} results")
+
+                                # Store results in session state
+
+                                st.session_state.search_results = results
+
+                                st.session_state.search_mode = "text_query"
+
+
+                        except Exception as e:
+
+                            st.error(f"Search error: {e}")
+
+                            st.session_state.search_results = None
+
+                            import traceback
+
+                            with st.expander("Error details"):
+
+                                st.code(traceback.format_exc())
+
+            # Render results if they exist in session state
+
+            if st.session_state.get('search_results') and st.session_state.get('search_mode') == "text_query":
+                _render_search_results(
+
+                    st.session_state.search_results, df, passage_col, label_columns, cache, namespace, finder
+
+                )
+
+
+        # ========================================================================
+
+        # MODE 2: Similar to Passage
+
+        # ========================================================================
+
+        elif search_mode == "🔍 Similar to Passage":
+
+            st.markdown("### 🔍 Find Similar Passages")
+
+            st.caption("Uses pure vector similarity - fast and no API costs")
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                passage_idx = st.number_input(
+
+                    "Passage index:",
+
+                    min_value=0,
+
+                    max_value=len(df) - 1,
+
+                    value=0,
+
+                    key="similar_idx"
+
+                )
+
+            with col2:
+
+                k_similar = st.number_input(
+
+                    "Number of results:",
+
+                    min_value=1,
+
+                    max_value=50,
+
+                    value=10,
+
+                    key="k_similar"
+
+                )
+
+            label_filter = st.selectbox(
+
+                "Filter by label (optional):",
+
+                ["None"] + label_columns,
+
+                key="label_filter_similar"
+
+            )
+
+            label_filter = None if label_filter == "None" else label_filter
+
+            # Show reference passage
+
+            if passage_idx in df.index and passage_col in df.columns:
+
+                with st.expander(f"📄 Reference Passage {passage_idx}", expanded=True):
+
+                    ref_text = df.loc[passage_idx, passage_col]
+
+                    if pd.notna(ref_text):
+
+                        st.write(ref_text[:500] + "..." if len(ref_text) > 500 else ref_text)
+
+                        active_labels = [l for l in label_columns if df.loc[passage_idx, l] == 1]
+
+                        if active_labels:
+                            st.markdown(f"**Labels:** {', '.join(active_labels)}")
+
+            if st.button("🔍 Find Similar", type="primary", key="search_similar"):
+
+                with st.spinner("Finding similar passages..."):
+
+                    try:
+
+                        results = finder.search_similar_to_passage(
+
+                            passage_idx=passage_idx,
+
+                            namespace=namespace,
+
+                            k=k_similar,
+
+                            label_filter=label_filter
+
+                        )
+
+                        if not results:
+
+                            st.warning("No similar passages found")
+
+                            st.session_state.search_results = None
+
+                        else:
+
+                            st.success(f"Found {len(results)} similar passages")
+
+                            # Convert to standard format for rendering
+
+                            formatted_results = []
+
+                            for r in results:
+                                formatted_results.append({
+
+                                    'passage_idx': r['passage_idx'],
+
+                                    'vector_score': r['similarity'],
+
+                                    'combined_score': r['similarity'],
+
+                                    'metadata': r['metadata']
+
+                                })
+
+                            # Store results in session state
+
+                            st.session_state.search_results = formatted_results
+
+                            st.session_state.search_mode = "similar"
+
+
+                    except Exception as e:
+
+                        st.error(f"Search error: {e}")
+
+                        st.session_state.search_results = None
+
+            # Render results if they exist in session state
+
+            if st.session_state.get('search_results') and st.session_state.get('search_mode') == "similar":
+                _render_search_results(
+
+                    st.session_state.search_results, df, passage_col, label_columns, cache, namespace, finder
+
+                )
+
+
+        # ========================================================================
+
+        # MODE 3: Label Semantic Search
+
+        # ========================================================================
+
+        else:  # Label Semantic Search
+
+            st.markdown("### 🏷️ Label Semantic Search")
+
+            st.caption("Find passages most relevant to a label's semantic meaning")
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                selected_label = st.selectbox(
+
+                    "Select label:",
+
+                    label_columns,
+
+                    key="semantic_label"
+
+                )
+
+            with col2:
+
+                top_k_semantic = st.number_input(
+
+                    "Number of results:",
+
+                    min_value=1,
+
+                    max_value=50,
+
+                    value=10,
+
+                    key="top_k_semantic"
+
+                )
+
+            # Show label description
+
+            if selected_label in finder.LABEL_QUERIES:
+                st.info(f"**Label description:** {finder.LABEL_QUERIES[selected_label]}")
+
+            if st.button("🔍 Search", type="primary", key="search_semantic"):
+
                 with st.spinner("Searching..."):
-                    from voyageai import Client
-                    voyage = Client(api_key=VOYAGE_API_KEY)
 
-                    valid_mask = df[passage_col].notna()
-                    valid_passages = df[valid_mask][passage_col].tolist()
-                    valid_indices = df[valid_mask].index.tolist()
+                    try:
 
-                    result = voyage.rerank(query=query, documents=valid_passages, model="rerank-2.5", top_k=top_k)
+                        results = finder.search_by_label_semantic(
 
-                    st.markdown(f"### Top {len(result.results)} Results")
+                            label=selected_label,
 
-                    for i, doc in enumerate(result.results, 1):
-                        idx = valid_indices[doc.index]
-                        score = doc.relevance_score
-                        text = valid_passages[doc.index]
+                            namespace=namespace,
 
-                        active_labels = [l for l in label_columns if df.loc[idx, l] == 1]
+                            top_k_vector=100,
 
-                        confidence_str = ""
-                        if cache:
-                            scores_df = cache['df_summary']
-                            if idx in scores_df['passage_idx'].values:
-                                score_row = scores_df[scores_df['passage_idx'] == idx].iloc[0]
-                                confidence_str = f" | Confidence: {(score_row['consistency_avg'] + score_row['rerank_avg'])/2:.3f}"
+                            top_k_rerank=top_k_semantic
 
-                        with st.expander(f"#{i} - Passage {idx} | Relevance: {score:.3f}{confidence_str}"):
-                            st.markdown(f"**Labels:** {', '.join(active_labels) if active_labels else 'None'}")
-                            st.markdown("---")
-                            st.write(text)
+                        )
+
+                        if not results:
+
+                            st.warning("No results found")
+
+                            st.session_state.search_results = None
+
+                        else:
+
+                            st.success(f"Found {len(results)} results")
+
+                            # Store results in session state
+
+                            st.session_state.search_results = results
+
+                            st.session_state.search_mode = "semantic"
+
+
+                    except Exception as e:
+
+                        st.error(f"Search error: {e}")
+
+                        st.session_state.search_results = None
+
+            # Render results if they exist in session state
+
+            if st.session_state.get('search_results') and st.session_state.get('search_mode') == "semantic":
+
+                _render_search_results(
+
+                    st.session_state.search_results, df, passage_col, label_columns, cache, namespace, finder
+
+                )
+
 
     elif page == "⚙️ Thresholds":
         st.markdown("## ⚙️ Configure Thresholds")
