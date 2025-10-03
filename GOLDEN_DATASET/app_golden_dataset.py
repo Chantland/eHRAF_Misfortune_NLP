@@ -122,7 +122,7 @@ def render_directory_browser(key_prefix="data"):
             st.rerun()
 
     with breadcrumb_cols[1]:
-        st.text_input("", str(current_dir), key=f"{key_prefix}_path_display", disabled=True, label_visibility="collapsed")
+        st.text_input("Current path", str(current_dir), key=f"{key_prefix}_path_display", disabled=True, label_visibility="collapsed")
 
     quick_nav_col1, quick_nav_col2 = st.columns(2)
     with quick_nav_col1:
@@ -145,7 +145,7 @@ def render_directory_browser(key_prefix="data"):
     subdirs = get_subdirectories(current_dir)
     if subdirs:
         for subdir in subdirs[:8]:
-            if st.button(f"📁 {subdir.name}", key=f"{key_prefix}_dir_{subdir}", use_container_width=True):
+            if st.button(f"📁 {subdir.name}", key=f"{key_prefix}_dir_{subdir}", width='stretch'):
                 if key_prefix == "data":
                     st.session_state.current_directory = subdir
                 else:
@@ -160,7 +160,7 @@ def render_directory_browser(key_prefix="data"):
         if xlsx_files:
             file_options = {f.name: str(f) for f in xlsx_files}
             selected_name = st.selectbox(
-                "📊 Select file:",
+                "Select file",
                 options=list(file_options.keys()),
                 key=f"{key_prefix}_file_selector",
                 label_visibility="collapsed"
@@ -780,7 +780,7 @@ def _display_inference_result(result, actual_labels_dict, label_columns):
     st.dataframe(
         pd.DataFrame(comparison_data),
         hide_index=True,
-        use_container_width=True
+        width='stretch'
     )
 
     tp = sum(1 for c in comparison.values() if "True Positive" in c)
@@ -948,7 +948,7 @@ def _show_batch_summary(batch_results, label_columns):
     st.dataframe(
         pd.DataFrame(label_breakdown),
         hide_index=True,
-        use_container_width=True
+        width='stretch'
     )
 
 
@@ -966,7 +966,7 @@ with st.sidebar:
         st.markdown("### 📂 Data")
 
         browse_mode = st.radio(
-            "",
+            "Browse mode",
             ["Quick", "Browse"],
             key="browse_mode_selector",
             horizontal=True,
@@ -984,7 +984,7 @@ with st.sidebar:
             else:
                 file_options = {f.name: str(f) for f in xlsx_files}
                 selected_name = st.selectbox(
-                    "File:",
+                    "Select file",
                     options=list(file_options.keys()),
                     key="quick_file_selector",
                     label_visibility="collapsed"
@@ -993,7 +993,7 @@ with st.sidebar:
         else:
             selected_file = render_directory_browser(key_prefix="data")
 
-        if selected_file and st.button("📂 Load", type="primary", use_container_width=True):
+        if selected_file and st.button("📂 Load", type="primary", width='stretch'):
             # Quick load without showing settings
             with st.spinner("Loading..."):
                 df, finder, label_columns, cache, passage_col, namespace = load_data(selected_file, header_row=1)
@@ -1054,7 +1054,7 @@ with st.sidebar:
         st.markdown("### 🤖 Model")
 
         model_browse_mode = st.radio(
-            "",
+            "Model browse mode",
             ["Quick", "Browse"],
             key="model_browse_mode_selector",
             horizontal=True,
@@ -1074,14 +1074,14 @@ with st.sidebar:
             else:
                 model_options = {str(m.parent.name if m.name == "final_model" else m.name): str(m) for m in model_dirs}
                 selected_model_name = st.selectbox(
-                    "Model:",
+                    "Select model",
                     options=list(model_options.keys()),
                     key="model_selector_quick",
                     label_visibility="collapsed"
                 )
                 selected_model_path = model_options[selected_model_name]
 
-                if st.button("🔄 Load", type="primary", key="load_model_quick", use_container_width=True):
+                if st.button("🔄 Load", type="primary", key="load_model_quick", width='stretch'):
                     with st.spinner("Loading..."):
                         success = st.session_state.model_loader.load_model(selected_model_path)
                         if success:
@@ -1090,7 +1090,7 @@ with st.sidebar:
         else:
             selected_model_path = render_directory_browser(key_prefix="model")
 
-            if selected_model_path and st.button("🔄 Load", type="primary", key="load_model_browse", use_container_width=True):
+            if selected_model_path and st.button("🔄 Load", type="primary", key="load_model_browse", width='stretch'):
                 with st.spinner("Loading..."):
                     success = st.session_state.model_loader.load_model(selected_model_path)
                     if success:
@@ -1165,7 +1165,7 @@ else:
         default_index = 0
 
     page = st.radio(
-        "Navigate:",
+        "Navigate",
         ["📊 Overview", "💻 Compute Scores", "🔍 Search", "⚙️ Thresholds", "📦 Tiers", "🤖 Model Inference", "💾 Export"],
         horizontal=True,
         label_visibility="visible",
@@ -1269,7 +1269,7 @@ else:
                     'Percentage': f"{pct:.1f}%"
                 })
             label_stats_df = pd.DataFrame(label_stats)
-            st.dataframe(label_stats_df, use_container_width=True, hide_index=True)
+            st.dataframe(label_stats_df, width='stretch', hide_index=True)
         else:
             st.info("💡 No scores computed yet. Go to 'Compute Scores' to generate them.")
 
@@ -1311,7 +1311,7 @@ else:
         with col2:
             st.markdown("**Select labels to compute:**")
             selected_labels = st.multiselect(
-                "Labels:",
+                "Labels to compute",
                 options=all_label_columns,
                 default=all_label_columns,
                 label_visibility="collapsed",
@@ -1444,7 +1444,7 @@ else:
         namespace = st.session_state.get('namespace', 'main')
 
         search_mode = st.radio(
-            "Search mode:",
+            "Search mode",
             ["📝 Text Query", "🔍 Similar to Passage", "🏷️ Label Semantic"],
             horizontal=True,
             key="search_mode_radio"
@@ -1976,7 +1976,7 @@ else:
                         st.dataframe(
                             pd.DataFrame(comparison_data),
                             hide_index=True,
-                            use_container_width=True
+                            width='stretch'
                         )
 
         else:  # Custom Text
