@@ -1,0 +1,76 @@
+{
+  "experiment_name": "roberta_non_hierarchical",
+  "auto_generated_name": false,
+  "output_dir": "./results/roberta_non_hierarchical",
+  "timestamp": "2025-10-03T09:47:30.252908",
+  "config": {
+    "base_model": "roberta-base",
+    "use_hierarchy": false,
+    "gated_hierarchy": false,
+    "gate_threshold": 0.3,
+    "hidden_size": 768,
+    "hierarchical_hidden_size": 256,
+    "num_hidden_layers": 2,
+    "dropout": 0.2,
+    "attention_dropout": 0.1,
+    "use_weighted_loss": false,
+    "use_focal_loss": false,
+    "focal_gamma": 0,
+    "teacher_forcing_ratio": 0
+  },
+  "training_config": {
+    "num_epochs": 10,
+    "batch_size": 16,
+    "gradient_accumulation_steps": 1,
+    "learning_rate": 2e-05,
+    "warmup_steps": 500,
+    "weight_decay": 0.01,
+    "max_length": 512,
+    "eval_steps": 100,
+    "save_steps": 500,
+    "logging_steps": 50,
+    "early_stopping_patience": 3,
+    "label_smoothing": 0.1
+  },
+  "data_config": {
+    "excel_path": "_test_dataset.xlsx",
+    "test_size": 0.2,
+    "validation_size": 0.1,
+    "random_seed": 42,
+    "stratify_by": "EVENT"
+  },
+  "label_structure": {
+    "EVENT": {
+      "main_label": "EVENT",
+      "sublabels": [
+        "EVENT_Illness",
+        "EVENT_Accident",
+        "EVENT_Other"
+      ],
+      "enabled": true
+    },
+    "CAUSE": {
+      "main_label": "CAUSE",
+      "sublabels": [
+        "CAUSE_Material_Physical",
+        "CAUSE_Spirits_Gods",
+        "CAUSE_Witchcraft_Sorcery",
+        "CAUSE_Rule_Violation_Taboo",
+        "CAUSE_Other"
+      ],
+      "enabled": true
+    },
+    "ACTION": {
+      "main_label": "ACTION",
+      "sublabels": [
+        "ACTION_Physical_Material",
+        "ACTION_Technical_Specialist",
+        "ACTION_Divination",
+        "ACTION_Shaman_Medium_Healer",
+        "ACTION_Priest_High_Religion",
+        "ACTION_Other"
+      ],
+      "enabled": true
+    }
+  }
+}

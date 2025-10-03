@@ -2105,7 +2105,7 @@ else:
 
             st.session_state.loaded_model_path = None
 
-            st.session_state.model_browse_directory = Path("./results").resolve()
+            st.session_state.model_browse_directory = Path("./models").resolve()
 
         st.markdown("""
         
@@ -2131,7 +2131,7 @@ else:
 
             "Selection mode:",
 
-            ["Quick (./results folder)", "Browse directories"],
+            ["Quick (./models folder)", "Browse directories"],
 
             key="model_browse_mode",
 
@@ -2141,17 +2141,17 @@ else:
 
         selected_model_path = None
 
-        if browse_mode_model == "Quick (./results folder)":
+        if browse_mode_model == "Quick (./models folder)":
 
             # Quick mode - show models in results folder
 
             from model_inference import find_model_directories
 
-            model_dirs = find_model_directories("./results")
+            model_dirs = find_model_directories("./models")
 
             if not model_dirs:
 
-                st.warning("⚠️ No trained models found in `./results/` directory")
+                st.warning("⚠️ No trained models found in `./models/` directory")
 
                 st.info("Train a model using the hierarchical training notebook first, or use Browse mode")
 
@@ -2228,8 +2228,8 @@ else:
 
             # Quick navigation
 
-            if st.button("📂 ./results", key="model_go_results"):
-                st.session_state.model_browse_directory = Path("./results").resolve()
+            if st.button("📂 ./models", key="model_go_results"):
+                st.session_state.model_browse_directory = Path("./models").resolve()
 
                 st.rerun()
 
