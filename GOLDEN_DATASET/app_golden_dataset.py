@@ -16,6 +16,7 @@ import io
 from tqdm import tqdm
 
 from discovery_architecture import GoldenDatasetFinder
+
 from dotenv import load_dotenv
 
 # Page config
@@ -630,7 +631,7 @@ else:
 
     page = st.radio(
         "Navigate:",
-        ["📊 Overview", "💻 Compute Scores", "🔍 Search", "⚙️ Thresholds", "📦 Tiers", "💾 Export"],
+        ["📊 Overview", "💻 Compute Scores", "🔍 Search", "⚙️ Thresholds", "📦 Tiers", "🤖 Model Inference", "💾 Export"],
         horizontal=True,
         label_visibility="visible"
     )
@@ -1194,68 +1195,793 @@ else:
                 st.metric("Passages", len(inference))
                 st.metric("%", f"{len(inference)/len(df)*100:.1f}%")
 
-    elif page == "💾 Export":
-        st.markdown("## 💾 Export Results")
+    elif page == "🤖 Model Inference":
+
+        st.markdown("## 🤖 Model Inference")
 
         df = st.session_state.df
 
-        if st.session_state.golden_dataset is not None:
-            st.markdown("### 🏆 Golden Dataset")
-            golden = st.session_state.golden_dataset
-            st.info(f"{len(golden)} passages")
+        passage_col = st.session_state.get('passage_col', 'Passage')
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        label_columns = st.session_state.label_columns
 
-            golden_indices = golden['passage_idx'].tolist()
-            golden_full = df.loc[golden_indices].copy()
-            for idx in golden_indices:
-                score_row = golden[golden['passage_idx'] == idx].iloc[0]
-                golden_full.loc[idx, 'confidence_composite'] = score_row['composite']
+        # Initialize model loader and browser state
 
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                golden_full.to_excel(writer, index=False)
+        if 'model_loader' not in st.session_state:
+            from model_inference import HRAFModelLoader
 
-            st.download_button(
-                label="📥 Download Golden Dataset",
-                data=output.getvalue(),
-                file_name=f"golden_dataset_{timestamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            st.session_state.model_loader = HRAFModelLoader()
+
+            st.session_state.loaded_model_path = None
+
+            st.session_state.model_browse_directory = Path("./results").resolve()
+
+        st.markdown("""
+        
+            Test your trained models on passages from the dataset to see how they perform.
+        
+            This helps you:
+        
+            - Validate model predictions on specific passages
+        
+            - Compare predictions to actual labels
+        
+            - Identify which passages your model struggles with
+        
+            - Test different models on the same passages
+        
+            """)
+
+        # Model Selection with Browser
+
+        st.markdown("### 📁 Select Model")
+
+        browse_mode_model = st.radio(
+
+            "Selection mode:",
+
+            ["Quick (./results folder)", "Browse directories"],
+
+            key="model_browse_mode",
+
+            horizontal=True
+
+        )
+
+        selected_model_path = None
+
+        if browse_mode_model == "Quick (./results folder)":
+
+            # Quick mode - show models in results folder
+
+            from model_inference import find_model_directories
+
+            model_dirs = find_model_directories("./results")
+
+            if not model_dirs:
+
+                st.warning("⚠️ No trained models found in `./results/` directory")
+
+                st.info("Train a model using the hierarchical training notebook first, or use Browse mode")
+
+            else:
+
+                col1, col2 = st.columns([3, 1])
+
+                with col1:
+
+                    model_options = {str(m.parent.name if m.name == "final_model" else m.name): str(m) for m in model_dirs}
+
+                    selected_model_name = st.selectbox(
+
+                        "Available models:",
+
+                        options=list(model_options.keys()),
+
+                        key="model_selector_quick"
+
+                    )
+
+                    selected_model_path = model_options[selected_model_name]
+
+                with col2:
+
+                    st.write("")  # Spacing
+
+                    st.write("")
+
+                    if st.button("🔄 Load Model", type="primary", key="load_quick"):
+
+                        with st.spinner("Loading model..."):
+
+                            success = st.session_state.model_loader.load_model(selected_model_path)
+
+                            if success:
+
+                                st.session_state.loaded_model_path = selected_model_path
+
+                                st.success("✅ Model loaded!")
+
+                            else:
+
+                                st.error("❌ Failed to load model")
+
+
+        else:
+
+            # Browse mode - directory navigator
+
+            current_dir = st.session_state.model_browse_directory
+
+            st.markdown("**Current Directory:**")
+
+            col1, col2, col3 = st.columns([1, 2, 1])
+
+            with col1:
+
+                if st.button("⬆️ Parent", key="model_go_up", disabled=current_dir == current_dir.parent):
+                    st.session_state.model_browse_directory = current_dir.parent
+
+                    st.rerun()
+
+            with col2:
+
+                st.text_input("Path:", str(current_dir), key="model_path_display", disabled=True, label_visibility="collapsed")
+
+            with col3:
+
+                if st.button("🏠 Home", key="model_go_home"):
+                    st.session_state.model_browse_directory = Path.home()
+
+                    st.rerun()
+
+            # Quick navigation
+
+            if st.button("📂 ./results", key="model_go_results"):
+                st.session_state.model_browse_directory = Path("./results").resolve()
+
+                st.rerun()
+
+            st.markdown("---")
+
+            # Show subdirectories
+
+            subdirs = get_subdirectories(current_dir)
+
+            if subdirs:
+
+                st.markdown("**📁 Folders:**")
+
+                for subdir in subdirs[:10]:
+
+                    if st.button(f"📁 {subdir.name}", key=f"model_dir_{subdir}"):
+                        st.session_state.model_browse_directory = subdir
+
+                        st.rerun()
+
+                if len(subdirs) > 10:
+                    st.caption(f"... and {len(subdirs) - 10} more folders")
+
+            st.markdown("---")
+
+            # Look for model files in current directory
+
+            has_config = (current_dir / "config.json").exists()
+
+            has_model = (current_dir / "pytorch_model.bin").exists() or (current_dir / "model.safetensors").exists()
+
+            if has_config and has_model:
+
+                st.success(f"✅ Model found in current directory!")
+
+                selected_model_path = str(current_dir)
+
+                if st.button("🔄 Load This Model", type="primary", key="load_browse"):
+
+                    with st.spinner("Loading model..."):
+
+                        success = st.session_state.model_loader.load_model(selected_model_path)
+
+                        if success:
+
+                            st.session_state.loaded_model_path = selected_model_path
+
+                            st.success("✅ Model loaded!")
+
+                        else:
+
+                            st.error("❌ Failed to load model")
+
+            else:
+
+                # Show what's in current directory
+
+                model_subdirs = []
+
+                try:
+
+                    for item in current_dir.iterdir():
+
+                        if item.is_dir():
+
+                            item_has_config = (item / "config.json").exists()
+
+                            item_has_model = (item / "pytorch_model.bin").exists() or (item / "model.safetensors").exists()
+
+                            if item_has_config and item_has_model:
+                                model_subdirs.append(item)
+
+                    if model_subdirs:
+
+                        st.info(f"Found {len(model_subdirs)} model(s) in subdirectories. Navigate into a folder to load.")
+
+                    else:
+
+                        st.info(
+                            "No model found in current directory. Navigate to a folder containing `config.json` and model weights.")
+
+                except (FileNotFoundError, PermissionError) as e:
+
+                    st.error(f"Cannot access directory: {e}")
+
+                    st.info("The directory may not exist. Navigate to an existing directory or create the results folder.")
+
+        # Show loaded model info
+
+        if st.session_state.model_loader.is_loaded():
+
+            st.markdown("---")
+
+            st.markdown("### ℹ️ Loaded Model")
+
+            model_info = st.session_state.model_loader.get_model_info()
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+
+                st.metric("Model", Path(
+                    st.session_state.loaded_model_path).parent.name if st.session_state.loaded_model_path else "Unknown")
+
+            if model_info:
+
+                with col2:
+
+                    test_f1 = model_info.get('test_results', {}).get('eval_f1_micro', 'N/A')
+
+                    if test_f1 != 'N/A':
+
+                        st.metric("Test F1", f"{test_f1:.3f}")
+
+                    else:
+
+                        st.metric("Test F1", "N/A")
+
+                with col3:
+
+                    config = model_info.get('config', {})
+
+                    hierarchy = "Hierarchical" if config.get('use_hierarchy') else "Flat"
+
+                    if config.get('gated_hierarchy'):
+                        hierarchy += " (Gated)"
+
+                    st.metric("Architecture", hierarchy)
+
+                with st.expander("📋 Model Configuration"):
+
+                    st.json(config)
+
+            st.markdown("---")
+
+            # Inference Section
+
+            st.markdown("### 🎯 Test Predictions")
+
+            inference_mode = st.radio(
+
+                "Select passages:",
+
+                ["From Dataset", "Custom Text"],
+
+                horizontal=True
+
             )
 
-        if st.session_state.tier1_dataset is not None:
+            if inference_mode == "From Dataset":
+
+                # Select passages from dataset
+
+                st.markdown("**Select passages to test:**")
+
+                # Filter options
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+
+                    filter_by = st.selectbox(
+
+                        "Filter by:",
+
+                        ["All passages", "Has specific label", "Random sample", "By index range"]
+
+                    )
+
+                with col2:
+
+                    if filter_by == "Has specific label":
+
+                        filter_label = st.selectbox("Label:", label_columns)
+
+                    elif filter_by == "Random sample":
+
+                        sample_size = st.number_input("Sample size:", 1, 100, 10)
+
+                    elif filter_by == "By index range":
+
+                        start_idx = st.number_input("Start index:", 0, len(df) - 1, 0)
+
+                        end_idx = st.number_input("End index:", start_idx + 1, len(df), min(start_idx + 10, len(df)))
+
+                # Get filtered passages
+
+                if filter_by == "All passages":
+
+                    available_indices = df.index.tolist()
+
+                elif filter_by == "Has specific label":
+
+                    available_indices = df[df[filter_label] == 1].index.tolist()
+
+                elif filter_by == "Random sample":
+
+                    available_indices = df.sample(n=min(sample_size, len(df))).index.tolist()
+
+                elif filter_by == "By index range":
+
+                    available_indices = df.iloc[start_idx:end_idx].index.tolist()
+
+                st.info(f"Found {len(available_indices)} passages")
+
+                num_to_show = st.slider("Number to test:", 1, min(20, len(available_indices)), 5)
+
+                if st.button("🔮 Predict", type="primary"):
+
+                    selected_indices = available_indices[:num_to_show]
+
+                    for idx in selected_indices:
+
+                        passage_text = df.loc[idx, passage_col]
+
+                        # Skip if passage is NaN or empty
+
+                        if pd.isna(passage_text) or not isinstance(passage_text, str):
+                            st.warning(f"⚠️ Passage {idx} has no text, skipping...")
+
+                            continue
+
+                        # Build actual_labels dict with error handling for missing columns and NaN values
+
+                        actual_labels = {}
+
+                        for col in label_columns:
+
+                            if col in df.columns:
+
+                                val = df.loc[idx, col]
+
+                                # Handle NaN - treat as 0
+
+                                if pd.isna(val):
+
+                                    actual_labels[col] = 0
+
+                                else:
+
+                                    actual_labels[col] = int(val)
+
+                            else:
+
+                                # Try without prefix (EVENT_Illness -> Illness)
+
+                                if '_' in col:
+
+                                    suffix = col.split('_', 1)[1]
+
+                                    if suffix in df.columns:
+
+                                        val = df.loc[idx, suffix]
+
+                                        if pd.isna(val):
+
+                                            actual_labels[suffix] = 0
+
+                                        else:
+
+                                            actual_labels[suffix] = int(val)
+
+                        with st.expander(f"📄 Passage {idx}"):
+
+                            st.markdown("**Text:**")
+
+                            st.write(passage_text[:500] + "..." if len(passage_text) > 500 else passage_text)
+
+                            # Get predictions
+
+                            with st.spinner("Predicting..."):
+
+                                result = st.session_state.model_loader.predict_passage(passage_text)
+
+                            # Compare
+
+                            from model_inference import compare_predictions_to_labels
+
+                            comparison = compare_predictions_to_labels(result['predictions'], actual_labels)
+
+                            # Build unified label set (use model's label format)
+
+                            all_model_labels = result['probabilities'].keys()
+
+                            # Infer main categories from actual sublabels
+
+                            ra_coded_labels = set()
+
+                            for label, val in actual_labels.items():
+
+                                if val == 1:
+
+                                    ra_coded_labels.add(label)
+
+                                    # Infer main category
+
+                                    if label in ['Illness', 'Accident', 'Other']:
+
+                                        ra_coded_labels.add('EVENT')
+
+                                    elif label in ['Just_Happens', 'Material_Physical', 'Spirits_Gods',
+
+                                                   'Witchcraft_Sorcery', 'Rule_Violation_Taboo']:
+
+                                        ra_coded_labels.add('CAUSE')
+
+                                    elif label in ['Physical_Material', 'Technical_Specialist', 'Divination',
+
+                                                   'Shaman_Medium_Healer', 'Priest_High_Religion', 'Other.2']:
+
+                                        ra_coded_labels.add('ACTION')
+
+                            # Create comparison data
+
+                            comparison_data = []
+
+                            for label in sorted(all_model_labels):
+
+                                # Predicted
+
+                                pred_prob = result['probabilities'][label]
+
+                                is_predicted = label in result['predicted_labels']
+
+                                pred_str = f"✓ {pred_prob:.2f}" if is_predicted else f"  {pred_prob:.2f}"
+
+                                # RA Coded (handle name mismatches)
+
+                                ra_label = None
+
+                                if label in ra_coded_labels:
+
+                                    ra_label = label
+
+                                elif '_' in label:
+
+                                    suffix = label.split('_', 1)[1]
+
+                                    if suffix in ra_coded_labels:
+                                        ra_label = suffix
+
+                                ra_str = f"✓ {ra_label}" if ra_label else "—"
+
+                                # Comparison
+
+                                comp = comparison.get(label, "")
+
+                                if "True Positive" in comp:
+
+                                    comp_str = "✓ Match"
+
+                                    comp_color = "🟢"
+
+                                elif "True Negative" in comp:
+
+                                    comp_str = "✓ Match"
+
+                                    comp_color = "⚪"
+
+                                elif "False Positive" in comp:
+
+                                    comp_str = "✗ Over-predicted"
+
+                                    comp_color = "🔴"
+
+                                elif "False Negative" in comp:
+
+                                    comp_str = "✗ Missed"
+
+                                    comp_color = "🟡"
+
+                                else:
+
+                                    comp_str = "—"
+
+                                    comp_color = ""
+
+                                comparison_data.append({
+
+                                    'Label': label,
+
+                                    'Predicted': pred_str,
+
+                                    'RA Coded': ra_str,
+
+                                    'Result': f"{comp_color} {comp_str}".strip()
+
+                                })
+
+                            # Display as dataframe
+
+                            st.dataframe(
+
+                                pd.DataFrame(comparison_data),
+
+                                hide_index=True,
+
+                                use_container_width=True
+
+                            )
+
+
+            else:  # Custom Text
+
+                st.markdown("**Enter custom passage text:**")
+
+                custom_text = st.text_area(
+
+                    "Passage:",
+
+                    placeholder="Enter text to test...",
+
+                    height=150
+
+                )
+
+                use_optimal = st.checkbox("Use optimal thresholds from training", value=True)
+
+                if not use_optimal:
+
+                    threshold = st.slider("Threshold:", 0.0, 1.0, 0.5, 0.05)
+
+                else:
+
+                    threshold = 0.5
+
+                if st.button("🔮 Predict", type="primary") and custom_text:
+
+                    with st.spinner("Predicting..."):
+
+                        result = st.session_state.model_loader.predict_passage(
+
+                            custom_text,
+
+                            use_optimal_thresholds=use_optimal,
+
+                            default_threshold=threshold
+
+                        )
+
+                    st.markdown("### Results")
+
+                    if result['predicted_labels']:
+
+                        st.markdown("**Predicted Labels:**")
+
+                        for label in result['predicted_labels']:
+                            prob = result['probabilities'][label]
+
+                            st.write(f"✓ **{label}** (confidence: {prob:.3f})")
+
+                    else:
+
+                        st.info("No labels predicted above threshold")
+
+                    with st.expander("📊 All Probabilities"):
+
+                        prob_df = pd.DataFrame([
+
+                            {"Label": k, "Probability": v, "Predicted": result['predictions'][k]}
+
+                            for k, v in result['probabilities'].items()
+
+                        ]).sort_values('Probability', ascending=False)
+
+                        st.dataframe(prob_df, use_container_width=True)
+
+
+        else:
+
+            st.info("👆 Load a model to start testing predictions")
+
+    elif page == "💾 Export":
+
+        st.markdown("## 💾 Export Results")
+
+
+        df = st.session_state.df
+
+        cache = st.session_state.cache
+
+        label_columns = st.session_state.label_columns
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+        # Export Score Results
+
+        if cache is not None:
+
+            st.markdown("### 📊 Score Results")
+
+            scores_df = cache['df_summary']
+
+            st.info(f"{len(scores_df)} passages with computed scores")
+
+
+            col1, col2 = st.columns(2)
+
+
+            with col1:
+
+                st.markdown("**Summary Scores (Simple)**")
+
+                st.caption("Passage index + average scores")
+
+
+                output_summary = io.BytesIO()
+
+                scores_df.to_excel(output_summary, index=False, engine='openpyxl')
+
+
+                st.download_button(
+
+                    label="📥 Download Score Summary",
+
+                    data=output_summary.getvalue(),
+
+                    file_name=f"score_summary_{timestamp}.xlsx",
+
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+
+                    help="Simple table with passage indices and average scores"
+
+                )
+
+
+            with col2:
+
+                st.markdown("**Detailed Scores (Per-Label)**")
+
+                st.caption("Includes consistency & rerank per label")
+
+
+                # Build detailed export
+
+                detailed_rows = []
+
+                for idx in scores_df['passage_idx'].tolist():
+
+                    row_data = {
+
+                        'passage_idx': idx,
+
+                        'consistency_avg': scores_df[scores_df['passage_idx'] == idx]['consistency_avg'].iloc[0],
+
+                        'rerank_avg': scores_df[scores_df['passage_idx'] == idx]['rerank_avg'].iloc[0],
+
+                        'num_labels': scores_df[scores_df['passage_idx'] == idx]['num_labels'].iloc[0]
+
+                    }
+
+
+                    # Add per-label consistency scores
+
+                    consistency_detailed = cache.get('consistency_detailed', {})
+
+                    if idx in consistency_detailed:
+
+                        for label in label_columns:
+
+                            if label in consistency_detailed[idx].get('by_label', {}):
+
+                                row_data[f'consistency_{label}'] = consistency_detailed[idx]['by_label'][label]
+
+
+                    # Add per-label rerank scores
+
+                    rerank_detailed = cache.get('rerank_detailed', {})
+
+                    for label in label_columns:
+
+                        if label in rerank_detailed and idx in rerank_detailed[label]:
+
+                            row_data[f'rerank_{label}'] = rerank_detailed[label][idx]
+
+
+                    detailed_rows.append(row_data)
+
+
+                detailed_df = pd.DataFrame(detailed_rows)
+
+
+                output_detailed = io.BytesIO()
+
+                detailed_df.to_excel(output_detailed, index=False, engine='openpyxl')
+
+
+                st.download_button(
+
+                    label="📥 Download Detailed Scores",
+
+                    data=output_detailed.getvalue(),
+
+                    file_name=f"score_detailed_{timestamp}.xlsx",
+
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+
+                    help="Full breakdown with per-label consistency and rerank scores"
+
+                )
+
+
             st.markdown("---")
-            st.markdown("### 📦 Tiered Datasets")
 
-            tier1 = st.session_state.tier1_dataset
-            tier2 = st.session_state.tier2_dataset
-            inference = st.session_state.inference_dataset
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if st.session_state.golden_dataset is not None:
+
+            st.markdown("### 🏆 Golden Dataset")
+
+            golden = st.session_state.golden_dataset
+
+            st.info(f"{len(golden)} passages")
+
+
+            golden_indices = golden['passage_idx'].tolist()
+
+            golden_full = df.loc[golden_indices].copy()
+
+            for idx in golden_indices:
+
+                score_row = golden[golden['passage_idx'] == idx].iloc[0]
+
+                golden_full.loc[idx, 'confidence_composite'] = score_row['composite']
+
 
             output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                tier1.to_excel(writer, sheet_name='Tier1_Golden', index=False)
-                tier2.to_excel(writer, sheet_name='Tier2_Training', index=False)
-                inference.to_excel(writer, sheet_name='Inference', index=False)
 
-                summary = pd.DataFrame({
-                    'Tier': ['Tier 1', 'Tier 2', 'Inference', 'Total'],
-                    'Count': [len(tier1), len(tier2), len(inference), len(tier1)+len(tier2)+len(inference)],
-                    'Percentage': [
-                        f"{len(tier1)/(len(tier1)+len(tier2)+len(inference))*100:.1f}%",
-                        f"{len(tier2)/(len(tier1)+len(tier2)+len(inference))*100:.1f}%",
-                        f"{len(inference)/(len(tier1)+len(tier2)+len(inference))*100:.1f}%",
-                        "100.0%"
-                    ]
-                })
-                summary.to_excel(writer, sheet_name='Summary', index=False)
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+
+                golden_full.to_excel(writer, index=False)
+
 
             st.download_button(
-                label="📥 Download All Tiers (Multi-Sheet Excel)",
+
+                label="📥 Download Golden Dataset",
+
                 data=output.getvalue(),
-                file_name=f"tiered_datasets_{timestamp}.xlsx",
+
+                file_name=f"golden_dataset_{timestamp}.xlsx",
+
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
             )
 
 # Footer

@@ -10,7 +10,6 @@
 # - Adjust training parameters like epochs, learning rate, and batch size in TRAINING_CONFIG
 # - Run all cells to train - results automatically save to ./results/your_experiment_name/
 # - Cell 17 provides a quick inference test - You can replace the "test_text" to see the model's predictions.
-# - For a full inference eval, use the inference_testing.ipynb notebook.
 # 
 #%%
 # ============================================================================
@@ -1303,7 +1302,7 @@ def predict_passage(text, model, tokenizer, label_names, thresholds=None):
     }
 
     # Print results
-    print(f"Predictions for: '{text[:100]}...'")
+    print(f"Predictions for: '{text[:250]}...'")
     print("\nPredicted Labels:")
     for label, pred in predictions.items():
         if pred:
@@ -1313,7 +1312,7 @@ def predict_passage(text, model, tokenizer, label_names, thresholds=None):
 
 # Test the inference function
 # FIX: Use loaded_model instead of model (which was deleted in Cell 18)
-test_text = "He broke his leg after crossing into the forbidden forest and being cursed by the forest spirits. His leg wouldn't heal, until he finally went to the local shaman and performed the healing ritual."
+test_text = "He was cursed by the forest spirits and his leg wouldn't heal until he went to the shaman."
 predictions, probabilities = predict_passage(
     test_text,
     loaded_model,  # Changed from 'model' to 'loaded_model'
@@ -1321,3 +1320,4 @@ predictions, probabilities = predict_passage(
     label_columns,
     optimal_thresholds
 )
+#%%
