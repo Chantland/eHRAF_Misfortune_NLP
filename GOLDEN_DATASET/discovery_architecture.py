@@ -1,10 +1,12 @@
 """
 Golden Dataset Identification for HRAF Misfortune Classification
-Author: John Heinz
-Date: September 2024
 
 Uses VoyageAI embeddings (voyage-3-large) and reranker (rerank-2.5)
 with Pinecone vector storage to identify high-confidence training passages.
+
+Requirements:
+- pinecone>=7.0.0
+- voyageai>=0.2.0
 """
 
 import voyageai
@@ -92,9 +94,9 @@ class GoldenDatasetFinder:
         self._setup_index()
 
     def _setup_index(self):
-        """Create or connect to Pinecone index"""
-        # Check if index exists
-        existing_indexes = [idx['name'] for idx in self.pc.list_indexes()]
+        """Create or connect to Pinecone index using v7 API"""
+        # Check if index exists - list_indexes() returns objects with .name attribute
+        existing_indexes = [idx.name for idx in self.pc.list_indexes()]
 
         if self.index_name not in existing_indexes:
             print(f"Creating new Pinecone index: {self.index_name}")
@@ -107,15 +109,21 @@ class GoldenDatasetFinder:
                     region=self.region
                 )
             )
-            # Wait for index to be ready
-            while not self.pc.describe_index(self.index_name).status['ready']:
+            # Wait for index to be ready - describe_index returns object with .status attribute
+            while True:
+                status = self.pc.describe_index(self.index_name).status
+                if hasattr(status, 'ready') and status.ready:
+                    break
+                elif isinstance(status, dict) and status.get('ready'):
+                    break
                 time.sleep(1)
             print("✅ Index created successfully")
         else:
             print(f"Connected to existing index: {self.index_name}")
 
-        # Connect to index
-        self.index = self.pc.Index(self.index_name)
+        # Connect to index - requires host parameter in v6+
+        index_info = self.pc.describe_index(self.index_name)
+        self.index = self.pc.Index(name=self.index_name, host=index_info.host)
 
     def _generate_passage_id(self, text: str) -> str:
         """Generate consistent ID from passage text"""
@@ -143,8 +151,25 @@ class GoldenDatasetFinder:
                         label_columns.append(col)
 
         return label_columns
-        """Generate consistent ID from passage text"""
-        return hashlib.md5(text.encode()).hexdigest()[:16]
+
+    def _get_vectors_from_fetch(self, fetch_result):
+        """
+        Extract vectors dict from FetchResponse object (Pinecone v7+)
+
+        Handles both dict-like access and attribute access
+        """
+        # Try attribute access first (v7+)
+        if hasattr(fetch_result, 'vectors'):
+            return fetch_result.vectors or {}
+        # Fall back to dict-like access
+        elif isinstance(fetch_result, dict):
+            return fetch_result.get('vectors', {})
+        # Try to get as dict
+        else:
+            try:
+                return dict(fetch_result).get('vectors', {})
+            except:
+                return {}
 
     def embed_and_store_passages(self,
                                  df: pd.DataFrame,
@@ -250,9 +275,266 @@ class GoldenDatasetFinder:
 
         # Verify
         stats = self.index.describe_index_stats()
-        print(f"✅ Stored {stats.get('total_vector_count', 0)} vectors")
+        # Handle both dict and object responses
+        if hasattr(stats, 'total_vector_count'):
+            total_vectors = stats.total_vector_count
+        else:
+            total_vectors = stats.get('total_vector_count', 0) if isinstance(stats, dict) else 0
+        print(f"✅ Stored {total_vectors} vectors")
 
         return passage_id_map
+
+    def search_with_filters(
+            self,
+            query: str,
+            namespace: str = "main",
+            label_filter: Optional[str] = None,
+            top_k_vector: int = 100,
+            top_k_rerank: int = 10,
+            rerank_instruction: Optional[str] = None,
+            min_similarity: float = 0.0
+    ) -> List[Dict]:
+        """
+        Enhanced search using vector search + optional reranking + metadata filters
+
+        Strategy:
+        1. Use Pinecone vector search to get top_k_vector candidates (fast, free)
+        2. Apply metadata filters in Pinecone
+        3. Optionally rerank the smaller set with instruction-following
+
+        Args:
+            query: Search query text
+            namespace: Pinecone namespace
+            label_filter: Optional label to filter by (e.g., "Illness")
+            top_k_vector: Number of candidates from vector search
+            top_k_rerank: Number of final results after reranking
+            rerank_instruction: Optional instruction for reranker guidance
+            min_similarity: Minimum similarity threshold
+
+        Returns:
+            List of search results with scores and metadata
+        """
+        # Step 1: Generate query embedding
+        query_result = self.voyage.embed(
+            texts=[query],
+            model="voyage-3-large",
+            input_type="query"
+        )
+        query_vector = query_result.embeddings[0]
+
+        # Step 2: Build metadata filter if needed
+        filter_dict = None
+        if label_filter:
+            filter_dict = {f"label_{label_filter}": {"$eq": 1}}
+
+        # Step 3: Vector search in Pinecone
+        search_results = self.index.query(
+            vector=query_vector,
+            top_k=top_k_vector,
+            namespace=namespace,
+            include_metadata=True,
+            filter=filter_dict
+        )
+
+        # Handle both dict and object responses
+        if hasattr(search_results, 'matches'):
+            matches = search_results.matches
+        else:
+            matches = search_results.get('matches', [])
+
+        # Filter by minimum similarity
+        candidates = []
+        for match in matches:
+            if hasattr(match, 'score'):
+                score = match.score
+                metadata = match.metadata
+                match_id = match.id
+            else:
+                score = match['score']
+                metadata = match['metadata']
+                match_id = match['id']
+
+            if score >= min_similarity:
+                candidates.append({
+                    'id': match_id,
+                    'passage_idx': metadata['passage_idx'],
+                    'vector_score': score,
+                    'text_preview': metadata.get('text_preview', ''),
+                    'metadata': metadata
+                })
+
+        if not candidates:
+            return []
+
+        # Step 4: Optional reranking with instruction-following
+        if top_k_rerank < len(candidates):
+            # Extract texts for reranking
+            texts = [c['text_preview'] for c in candidates]
+
+            # Build query with optional instruction
+            rerank_query = query
+            if rerank_instruction:
+                rerank_query = f"{rerank_instruction}\n\nQuery: {query}"
+
+            # Rerank with instruction-following
+            try:
+                rerank_result = self.voyage.rerank(
+                    query=rerank_query,
+                    documents=texts,
+                    model="rerank-2.5",
+                    top_k=top_k_rerank
+                )
+
+                # Combine vector and rerank scores
+                final_results = []
+                for result in rerank_result.results:
+                    candidate = candidates[result.index]
+                    final_results.append({
+                        'passage_idx': candidate['passage_idx'],
+                        'vector_score': candidate['vector_score'],
+                        'rerank_score': result.relevance_score,
+                        'combined_score': 0.3 * candidate['vector_score'] + 0.7 * result.relevance_score,
+                        'text_preview': candidate['text_preview'],
+                        'metadata': candidate['metadata']
+                    })
+
+                # Sort by combined score
+                final_results.sort(key=lambda x: x['combined_score'], reverse=True)
+                return final_results
+
+            except Exception as e:
+                print(f"Reranking failed: {e}")
+                print("Falling back to vector search results only")
+                # Fall back to vector-only results
+                return candidates[:top_k_rerank]
+
+        else:
+            # No reranking needed, return vector results
+            return candidates
+
+    def search_similar_to_passage(
+            self,
+            passage_idx: int,
+            namespace: str = "main",
+            k: int = 20,
+            label_filter: Optional[str] = None,
+            exclude_self: bool = True
+    ) -> List[Dict]:
+        """
+        Find passages similar to a given passage using vector similarity
+
+        This is more efficient than reranking for "find similar" queries
+        since it uses only Pinecone vector search (no API cost)
+
+        Args:
+            passage_idx: Index of query passage
+            namespace: Pinecone namespace
+            k: Number of results
+            label_filter: Optional label to filter by
+            exclude_self: Whether to exclude query passage
+
+        Returns:
+            List of similar passages
+        """
+        query_id = f"passage_{passage_idx}"
+
+        # Fetch query vector
+        fetch_result = self.index.fetch(ids=[query_id], namespace=namespace)
+        vectors_dict = self._get_vectors_from_fetch(fetch_result)
+
+        if query_id not in vectors_dict:
+            raise ValueError(f"Passage {passage_idx} not found in index")
+
+        # Extract vector
+        vector_data = vectors_dict[query_id]
+        if hasattr(vector_data, 'values'):
+            query_vector = vector_data.values
+        else:
+            query_vector = vector_data['values']
+
+        # Build filter
+        filter_dict = None
+        if label_filter:
+            filter_dict = {f"label_{label_filter}": {"$eq": 1}}
+
+        # Search
+        search_results = self.index.query(
+            vector=query_vector,
+            top_k=k + (1 if exclude_self else 0),
+            namespace=namespace,
+            include_metadata=True,
+            filter=filter_dict
+        )
+
+        # Process results
+        if hasattr(search_results, 'matches'):
+            matches = search_results.matches
+        else:
+            matches = search_results.get('matches', [])
+
+        similar = []
+        for match in matches:
+            if hasattr(match, 'id'):
+                match_id = match.id
+                score = match.score
+                metadata = match.metadata
+            else:
+                match_id = match['id']
+                score = match['score']
+                metadata = match['metadata']
+
+            if exclude_self and match_id == query_id:
+                continue
+
+            similar.append({
+                'passage_idx': metadata['passage_idx'],
+                'similarity': score,
+                'metadata': metadata
+            })
+
+        return similar[:k]
+
+    def search_by_label_semantic(
+            self,
+            label: str,
+            namespace: str = "main",
+            top_k_vector: int = 50,
+            top_k_rerank: int = 10
+    ) -> List[Dict]:
+        """
+        Find passages most relevant to a label's semantic meaning
+
+        Uses the label's semantic description as a query and reranks
+        with instruction-following for best results
+
+        Args:
+            label: Label name (e.g., "Illness", "Spirits_Gods")
+            namespace: Pinecone namespace
+            top_k_vector: Vector search candidates
+            top_k_rerank: Final reranked results
+
+        Returns:
+            List of most semantically relevant passages
+        """
+        if label not in self.LABEL_QUERIES:
+            raise ValueError(f"Unknown label: {label}")
+
+        query = self.LABEL_QUERIES[label]
+
+        # Build instruction for reranker
+        instruction = (
+            f"Prioritize passages that clearly demonstrate or describe {label}. "
+            f"Focus on explicit mentions and detailed descriptions rather than vague references."
+        )
+
+        return self.search_with_filters(
+            query=query,
+            namespace=namespace,
+            label_filter=label,  # Only search passages with this label
+            top_k_vector=top_k_vector,
+            top_k_rerank=top_k_rerank,
+            rerank_instruction=instruction
+        )
 
     def find_similar_passages(self,
                               query_idx: int,
@@ -276,11 +558,21 @@ class GoldenDatasetFinder:
         # Fetch query vector
         fetch_result = self.index.fetch(ids=[query_id], namespace=namespace)
 
-        # Handle new Pinecone API - access as attribute not dict
-        if not hasattr(fetch_result, 'vectors') or query_id not in fetch_result.vectors:
+        # Extract vectors using helper method
+        vectors_dict = self._get_vectors_from_fetch(fetch_result)
+
+        # Check if query vector exists
+        if query_id not in vectors_dict:
             raise ValueError(f"Passage {query_idx} not found in index")
 
-        query_vector = fetch_result.vectors[query_id].values
+        # Extract vector values - handle both dict and object
+        vector_data = vectors_dict[query_id]
+        if hasattr(vector_data, 'values'):
+            query_vector = vector_data.values
+        elif isinstance(vector_data, dict):
+            query_vector = vector_data['values']
+        else:
+            query_vector = vector_data
 
         # Search for similar vectors
         search_results = self.index.query(
@@ -290,16 +582,34 @@ class GoldenDatasetFinder:
             include_metadata=True
         )
 
+        # Extract matches - handle both dict and object responses
+        if hasattr(search_results, 'matches'):
+            matches = search_results.matches
+        elif isinstance(search_results, dict):
+            matches = search_results.get('matches', [])
+        else:
+            matches = []
+
         # Process results
         similar_passages = []
-        for match in search_results.matches:
-            if exclude_self and match.id == query_id:
+        for match in matches:
+            # Handle both dict and object match format
+            if hasattr(match, 'id'):
+                match_id = match.id
+                match_score = match.score
+                match_metadata = match.metadata
+            else:
+                match_id = match['id']
+                match_score = match['score']
+                match_metadata = match['metadata']
+
+            if exclude_self and match_id == query_id:
                 continue
 
             similar_passages.append({
-                'passage_idx': match.metadata['passage_idx'],
-                'similarity': match.score,
-                'metadata': match.metadata
+                'passage_idx': match_metadata['passage_idx'],
+                'similarity': match_score,
+                'metadata': match_metadata
             })
 
         return similar_passages[:k]
@@ -320,15 +630,27 @@ class GoldenDatasetFinder:
         query_id = f"passage_{query_idx}"
         fetch_result = self.index.fetch(ids=[query_id], namespace=namespace)
 
-        # Handle new Pinecone API
-        if not hasattr(fetch_result, 'vectors') or query_id not in fetch_result.vectors:
+        # Extract vectors using helper method
+        vectors_dict = self._get_vectors_from_fetch(fetch_result)
+
+        # Check if passage exists
+        if query_id not in vectors_dict:
             # If passage not found, return 0 consistency for all labels
             return {label: 0.0 for label in label_columns}
 
-        query_vector_data = fetch_result.vectors[query_id]
+        # Extract metadata - handle both dict and object
+        vector_data = vectors_dict[query_id]
+        if hasattr(vector_data, 'metadata'):
+            query_metadata = vector_data.metadata or {}
+        elif isinstance(vector_data, dict):
+            query_metadata = vector_data.get('metadata', {})
+        else:
+            query_metadata = {}
+
+        # Get query labels
         query_labels = {}
         for label in label_columns:
-            query_labels[label] = query_vector_data.metadata.get(f'label_{label}', 0)
+            query_labels[label] = query_metadata.get(f'label_{label}', 0)
 
         # Calculate agreement with similar passages
         for label in label_columns:
@@ -436,11 +758,9 @@ class GoldenDatasetFinder:
                 label_columns=label_columns,
                 namespace=namespace
             )
-            # Track which passages were actually embedded
             embedded_indices = list(passage_id_map.keys())
         else:
             print("\n📊 Step 1: Using existing embeddings from Pinecone")
-            # Assume all valid passages are embedded
             valid_mask = df[passage_column].notna()
             embedded_indices = df[valid_mask].index.tolist()
 
@@ -448,7 +768,7 @@ class GoldenDatasetFinder:
 
         # Step 2: Calculate consistency scores
         print("\n🔍 Step 2: Calculating label consistency from similar passages...")
-        consistency_scores = {}  # Use dict to map indices to scores
+        consistency_scores = {}
 
         for idx in tqdm(embedded_indices, desc="Checking consistency"):
             try:
@@ -487,7 +807,6 @@ class GoldenDatasetFinder:
         passages = df[passage_column].tolist()
 
         for label in tqdm(label_columns, desc="Reranking labels"):
-            # Only rerank passages with this label that were embedded
             label_mask = df[label] == 1
             label_indices = [idx for idx in embedded_indices if idx in df.index and df.loc[idx, label] == 1]
             label_passages = [passages[idx] for idx in label_indices]
@@ -495,7 +814,6 @@ class GoldenDatasetFinder:
             if label_passages:
                 scores = self.rerank_passages_for_label(label_passages, label)
 
-                # Map scores back to indices
                 for idx, score in zip(label_indices, scores):
                     rerank_scores[label][idx] = score
 
@@ -504,17 +822,13 @@ class GoldenDatasetFinder:
 
         golden_candidates = []
         for idx in embedded_indices:
-            # Get active labels for this passage
             active_labels = [label for label in label_columns
                              if idx in df.index and df.loc[idx, label] == 1]
 
             if not active_labels:
                 continue
 
-            # Calculate composite score
             consistency_score = consistency_scores.get(idx, 0.0)
-
-            # Get average rerank score for active labels
             rerank_values = [rerank_scores[label].get(idx, 0.0) for label in active_labels]
             avg_rerank = np.mean(rerank_values) if rerank_values else 0.0
 
@@ -538,7 +852,6 @@ class GoldenDatasetFinder:
             print(
                 f"\n⚠️  No passages met the criteria (consistency >= {min_consistency}, rerank >= {min_rerank_score})")
             print("   Consider lowering thresholds or checking data quality")
-            # Return empty dataframe with expected columns
             return pd.DataFrame(
                 columns=list(df.columns) + ['confidence_consistency', 'confidence_rerank', 'confidence_composite'])
 
@@ -564,8 +877,8 @@ class GoldenDatasetFinder:
 if __name__ == "__main__":
     # Initialize
     finder = GoldenDatasetFinder(
-        voyage_api_key="YOUR_VOYAGE_API_KEY",
-        pinecone_api_key="YOUR_PINECONE_API_KEY",
+        voyage_api_key=os.getenv("VOYAGE_API_KEY"),
+        pinecone_api_key=os.getenv("PINECONE_API_KEY"),
         index_name="hraf-misfortune",
         cloud="aws",
         region="us-east-1"
@@ -577,11 +890,11 @@ if __name__ == "__main__":
     # Identify golden dataset
     golden_df = finder.identify_golden_dataset(
         df=df,
-        passage_column='Passage',  # Note: capital P
+        passage_column='Passage',
         min_consistency=0.7,
         min_rerank_score=0.6,
-        target_size=200,  # For 360 passage sample
-        recompute_embeddings=True  # First run
+        target_size=200,
+        recompute_embeddings=True
     )
 
     # Save results
