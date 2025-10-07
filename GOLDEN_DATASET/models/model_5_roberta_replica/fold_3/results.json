@@ -1,0 +1,22 @@
+{
+  "eval_loss": 0.29806897044181824,
+  "eval_f1_micro": 0.6444249341527656,
+  "eval_f1_macro": 0.464182444600517,
+  "eval_f1_main_avg": NaN,
+  "eval_f1_EVENT_Illness": 0.8700173310225303,
+  "eval_f1_EVENT_Accident": 0.3865546218487395,
+  "eval_f1_EVENT_Other": 0.573469387755102,
+  "eval_f1_CAUSE_Material_Physical": 0.44221105527638194,
+  "eval_f1_CAUSE_Spirits_Gods": 0.6876574307304786,
+  "eval_f1_CAUSE_Witchcraft_Sorcery": 0.652542372881356,
+  "eval_f1_CAUSE_Rule_Violation_Taboo": 0.4797507788161994,
+  "eval_f1_ACTION_Physical_Material": 0.691044776119403,
+  "eval_f1_ACTION_Technical_Specialist": 0.29896907216494845,
+  "eval_f1_ACTION_Divination": 0.0,
+  "eval_f1_ACTION_Shaman_Medium_Healer": 0.4879725085910653,
+  "eval_f1_ACTION_Priest_High_Religion": 0.0,
+  "eval_runtime": 41.632,
+  "eval_samples_per_second": 49.793,
+  "eval_steps_per_second": 3.123,
+  "epoch": 15.0
+}

@@ -1,6 +1,6 @@
 """
 Chat Assistant Module for HRAF Golden Dataset Discovery
-Full corpus access and tool control integration
+Full corpus access and multi-model comparison support
 """
 
 import anthropic
@@ -12,7 +12,7 @@ import numpy as np
 
 
 class HRAFChatAssistant:
-    """Claude-powered chat assistant with full dataset and tool access"""
+    """Claude-powered chat assistant with full dataset and multi-model access"""
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
@@ -33,12 +33,21 @@ class HRAFChatAssistant:
 You can:
 - Read any passage by index
 - Analyze label distributions across the corpus
-- Run model predictions on passages
+- Run predictions with MULTIPLE MODELS and compare them
 - Search for similar passages
 - Examine quality scores in detail
 - Answer questions about specific passages
 - Compare passages and labels
+- Compare model performance across different architectures
 - Provide statistical analysis
+
+# Multi-Model Comparison
+You have access to multiple trained models simultaneously. You can:
+- Compare predictions from different models on the same passage
+- Analyze which models perform better on different label types
+- Identify disagreements between models
+- Recommend which model to use for specific scenarios
+- Compare model configurations (hierarchical vs flat, gated vs ungated, etc.)
 
 # Dataset Structure
 - EVENT labels: Illness, Accident, Other
@@ -50,10 +59,11 @@ If the user asks about:
 - Specific labels → Provide distribution, examples, score analysis
 - Specific passages → Read and analyze the actual text
 - Relationships → Search for related passages
-- Model performance → Run predictions and show results
+- Model performance → Run predictions with ALL loaded models and compare results
+- Model comparison → Analyze differences in architecture, performance, and predictions
 - Patterns → Analyze across the full corpus
 
-You have direct access to all data. Use it to provide detailed, specific answers with actual examples.""",
+You have direct access to all data and all loaded models. Use them to provide detailed, specific answers with actual examples and comparisons.""",
                 "cache_control": {"type": "ephemeral"}
             }
         ]
@@ -70,7 +80,7 @@ You have direct access to all data. Use it to provide detailed, specific answers
         return system_blocks
 
     def _build_dataset_context(self, session_state: Dict[str, Any]) -> str:
-        """Build detailed context about current dataset"""
+        """Build detailed context about current dataset and all loaded models"""
         parts = ["# Current Dataset Context\n"]
 
         df = session_state.get('df')
@@ -112,29 +122,63 @@ You have direct access to all data. Use it to provide detailed, specific answers
                     rerank_count = (scores['rerank_avg'] >= thresh).sum()
                     parts.append(f"- Score ≥ {thresh}: consistency={cons_count}, rerank={rerank_count}")
 
-        # Model info
-        if 'model_loader' in session_state:
-            loader = session_state['model_loader']
-            if loader.is_loaded():
+        # Multi-model info
+        loaded_models = session_state.get('loaded_models', {})
+        if loaded_models:
+            parts.append(f"\n## Loaded Models ({len(loaded_models)} total)")
+
+            for model_name, loader in loaded_models.items():
+                parts.append(f"\n### Model: {model_name}")
+
                 info = loader.get_model_info()
                 if info:
                     config = info.get('config', {})
-                    parts.append(f"\n## Loaded Model")
-                    parts.append(f"- Type: {'Hierarchical' if config.get('use_hierarchy') else 'Flat'}")
-                    parts.append(f"- Gated: {config.get('gated_hierarchy', False)}")
 
+                    # Architecture details
+                    parts.append(f"**Architecture:**")
+                    parts.append(f"- Type: {'Hierarchical' if config.get('use_hierarchy') else 'Flat Multi-label'}")
+                    parts.append(f"- Base Model: {config.get('base_model', 'unknown')}")
+
+                    if config.get('use_hierarchy'):
+                        parts.append(f"- Gated: {config.get('gated_hierarchy', False)}")
+                        parts.append(f"- Gate Threshold: {config.get('gate_threshold', 0.5)}")
+
+                    parts.append(f"- Focal Loss: {config.get('use_focal_loss', False)}")
+                    if config.get('use_focal_loss'):
+                        parts.append(f"- Focal Gamma: {config.get('focal_gamma', 2.0)}")
+
+                    # Performance metrics
                     test_results = info.get('test_results', {})
                     if test_results:
+                        parts.append(f"\n**Test Performance:**")
                         f1 = test_results.get('eval_f1_micro')
                         if f1:
-                            parts.append(f"- Test F1: {f1:.3f}")
+                            parts.append(f"- F1 (micro): {f1:.3f}")
+
+                        f1_macro = test_results.get('eval_f1_macro')
+                        if f1_macro:
+                            parts.append(f"- F1 (macro): {f1_macro:.3f}")
+
+                    # Optimal thresholds
+                    if loader.optimal_thresholds:
+                        parts.append(f"\n**Optimal Thresholds:** Available for {len(loader.optimal_thresholds)} labels")
+                        parts.append("(You can compare how different thresholds affect predictions)")
+        else:
+            parts.append(f"\n## No Models Loaded")
+            parts.append("Note: Cannot run predictions without loaded models")
 
         # Sample passages available
         parts.append(f"\n## Available Actions")
         parts.append(f"- You can read any passage by index (0-{len(df)-1})")
         parts.append(f"- You can search for passages with specific labels")
-        parts.append(f"- You can run model predictions on any passage")
+        if loaded_models:
+            parts.append(f"- You can run predictions with {len(loaded_models)} model(s) and compare results")
+            parts.append(f"- You can analyze which models perform better on different label types")
         parts.append(f"- You can analyze label co-occurrence patterns")
+
+        tier_context = self._build_tier_configuration_context(session_state)
+        if tier_context:
+            parts.append(tier_context)
 
         return "\n".join(parts)
 
@@ -178,6 +222,27 @@ You have direct access to all data. Use it to provide detailed, specific answers
             'scores': scores,
             'length': len(str(passage_text))
         }
+
+    def _run_multi_model_prediction(self, session_state: Dict[str, Any], passage_text: str) -> Optional[Dict[str, Any]]:
+        """Run prediction with ALL loaded models and return comparison"""
+        loaded_models = session_state.get('loaded_models', {})
+
+        if not loaded_models:
+            return None
+
+        results = {}
+
+        for model_name, loader in loaded_models.items():
+            if not loader.is_loaded():
+                continue
+
+            try:
+                result = loader.predict_passage(passage_text)
+                results[model_name] = result
+            except Exception as e:
+                results[model_name] = {'error': str(e)}
+
+        return results if results else None
 
     def _search_passages_by_label(self, session_state: Dict[str, Any], label: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Search for passages with a specific label using semantic search"""
@@ -342,21 +407,6 @@ You have direct access to all data. Use it to provide detailed, specific answers
 
         return stats
 
-    def _run_model_prediction(self, session_state: Dict[str, Any], passage_text: str) -> Optional[Dict[str, Any]]:
-        """Run model prediction on a passage"""
-        if 'model_loader' not in session_state:
-            return None
-
-        loader = session_state['model_loader']
-        if not loader.is_loaded():
-            return None
-
-        try:
-            result = loader.predict_passage(passage_text)
-            return result
-        except Exception as e:
-            return {'error': str(e)}
-
     def _enhance_message_with_data(self, message: str, session_state: Dict[str, Any]) -> str:
         """Enhance user message with relevant data based on their question"""
         enhanced_parts = [message]
@@ -366,6 +416,22 @@ You have direct access to all data. Use it to provide detailed, specific answers
             return message
 
         label_columns = session_state.get('label_columns', [])
+        loaded_models = session_state.get('loaded_models', {})
+
+        # Check if asking about model comparison
+        if any(word in message.lower() for word in ['compare', 'comparison', 'difference', 'better', 'versus', 'vs']):
+            if loaded_models and any(word in message.lower() for word in ['model', 'models', 'prediction', 'predictions']):
+                enhanced_parts.append("\n\n# Available Models for Comparison:")
+                for model_name, loader in loaded_models.items():
+                    info = loader.get_model_info()
+                    if info:
+                        config = info.get('config', {})
+                        enhanced_parts.append(f"\n## {model_name}")
+                        enhanced_parts.append(f"Type: {'Hierarchical' if config.get('use_hierarchy') else 'Flat'}")
+                        enhanced_parts.append(f"Gated: {config.get('gated_hierarchy', False)}")
+                        test_f1 = info.get('test_results', {}).get('eval_f1_micro')
+                        if test_f1:
+                            enhanced_parts.append(f"Test F1: {test_f1:.3f}")
 
         # Check if asking about specific passage indices
         if 'passage' in message.lower() and any(str(i) in message for i in range(len(df))):
@@ -373,9 +439,32 @@ You have direct access to all data. Use it to provide detailed, specific answers
             import re
             numbers = [int(n) for n in re.findall(r'\b\d+\b', message) if int(n) < len(df)]
 
-            if numbers:
+            if numbers and loaded_models:
+                # Run predictions with all models
+                enhanced_parts.append("\n\n# Requested Passage Data with Model Predictions:")
+                for idx in numbers[:3]:  # Limit to 3 passages
+                    passage_data = self._get_passage_content(session_state, idx)
+                    if passage_data:
+                        enhanced_parts.append(f"\n## Passage {idx}")
+                        enhanced_parts.append(f"Text: {passage_data['text'][:300]}..." if len(passage_data['text']) > 300 else f"Text: {passage_data['text']}")
+                        enhanced_parts.append(f"Actual Labels: {', '.join(passage_data['active_labels'])}")
+
+                        if passage_data['scores']:
+                            enhanced_parts.append(f"Quality Scores: consistency={passage_data['scores']['consistency']:.3f}, rerank={passage_data['scores']['rerank']:.3f}")
+
+                        # Run predictions with all models
+                        model_predictions = self._run_multi_model_prediction(session_state, passage_data['text'])
+                        if model_predictions:
+                            enhanced_parts.append("\nModel Predictions:")
+                            for model_name, result in model_predictions.items():
+                                if 'error' not in result:
+                                    predicted_labels = result.get('predicted_labels', [])
+                                    enhanced_parts.append(f"- {model_name}: {', '.join(predicted_labels) if predicted_labels else 'None'}")
+
+            elif numbers:
+                # Just show passage data without predictions
                 enhanced_parts.append("\n\n# Requested Passage Data:")
-                for idx in numbers[:5]:  # Limit to 5 passages
+                for idx in numbers[:5]:
                     passage_data = self._get_passage_content(session_state, idx)
                     if passage_data:
                         enhanced_parts.append(f"\n## Passage {idx}")
@@ -409,6 +498,101 @@ You have direct access to all data. Use it to provide detailed, specific answers
                             enhanced_parts.append(f"- [{ex['index']}] {text_preview}")
 
         return "\n".join(enhanced_parts)
+
+    def _build_tier_configuration_context(self, session_state: Dict[str, Any]) -> str:
+        """Build context about tier configurations and quality scores"""
+        parts = []
+
+        cache = session_state.get('cache')
+        if not cache:
+            return ""
+
+        scores_df = cache.get('df_summary')
+        if scores_df is None or len(scores_df) == 0:
+            return ""
+
+        parts.append("\n## Tier Configuration Context")
+
+        # Quality distribution statistics
+        parts.append("\n### Quality Score Distribution")
+        parts.append(f"- Total scored passages: {len(scores_df)}")
+        parts.append(f"- Consistency median: {scores_df['consistency_avg'].median():.3f}")
+        parts.append(f"- Consistency mean: {scores_df['consistency_avg'].mean():.3f}")
+        parts.append(f"- Rerank median: {scores_df['rerank_avg'].median():.3f}")
+        parts.append(f"- Rerank mean: {scores_df['rerank_avg'].mean():.3f}")
+
+        # Quality tiers distribution
+        parts.append("\n### Passages by Quality Level")
+
+        high_quality = ((scores_df['consistency_avg'] >= 0.7) & (scores_df['rerank_avg'] >= 0.5)).sum()
+        good_quality = ((scores_df['consistency_avg'] >= 0.5) & (scores_df['rerank_avg'] >= 0.35)).sum()
+        acceptable_quality = ((scores_df['consistency_avg'] >= 0.4) & (scores_df['rerank_avg'] >= 0.25)).sum()
+
+        parts.append(
+            f"- High quality (≥0.7 cons, ≥0.5 rerank): {high_quality} ({high_quality / len(scores_df) * 100:.1f}%)")
+        parts.append(
+            f"- Good quality (≥0.5 cons, ≥0.35 rerank): {good_quality} ({good_quality / len(scores_df) * 100:.1f}%)")
+        parts.append(
+            f"- Acceptable (≥0.4 cons, ≥0.25 rerank): {acceptable_quality} ({acceptable_quality / len(scores_df) * 100:.1f}%)")
+
+        # Recommended preset based on data
+        if high_quality / len(scores_df) > 0.15:
+            parts.append("\n### Recommendation")
+            parts.append("- **Conservative preset** feasible - sufficient high-quality data")
+        elif high_quality / len(scores_df) > 0.10:
+            parts.append("\n### Recommendation")
+            parts.append("- **Balanced preset** recommended - good quality/quantity balance")
+        else:
+            parts.append("\n### Recommendation")
+            parts.append("- **Aggressive preset** suggested - limited high-quality data")
+            parts.append("- Consider: Lower thresholds or focus on label targeting")
+
+        # Check for tier configurations
+        tier1_dataset = session_state.get('tier1_dataset')
+        if tier1_dataset is not None:
+            parts.append("\n### Current Tier Configuration")
+
+            tier2_dataset = session_state.get('tier2_dataset')
+            inference_dataset = session_state.get('inference_dataset')
+            metadata = session_state.get('tier_metadata', {})
+
+            parts.append(
+                f"- Tier 1 count: {len(tier1_dataset)} ({len(tier1_dataset) / len(session_state['df']) * 100:.1f}%)")
+            parts.append(
+                f"- Tier 2 count: {len(tier2_dataset)} ({len(tier2_dataset) / len(session_state['df']) * 100:.1f}%)")
+            parts.append(
+                f"- Inference count: {len(inference_dataset)} ({len(inference_dataset) / len(session_state['df']) * 100:.1f}%)")
+
+            # Quality stats from metadata
+            tier_meta = metadata.get('tiers', {})
+
+            if 'tier1' in tier_meta and 'quality' in tier_meta['tier1']:
+                tier1_quality = tier_meta['tier1']['quality']
+                parts.append(f"\n### Tier 1 Quality")
+                parts.append(f"- Consistency mean: {tier1_quality['consistency_mean']:.3f}")
+                parts.append(f"- Rerank mean: {tier1_quality['rerank_mean']:.3f}")
+                parts.append(f"- Composite mean: {tier1_quality['composite_mean']:.3f}")
+
+            if 'tier2' in tier_meta and 'quality' in tier_meta['tier2']:
+                tier2_quality = tier_meta['tier2']['quality']
+                parts.append(f"\n### Tier 2 Quality")
+                parts.append(f"- Consistency mean: {tier2_quality['consistency_mean']:.3f}")
+                parts.append(f"- Rerank mean: {tier2_quality['rerank_mean']:.3f}")
+                parts.append(f"- Composite mean: {tier2_quality['composite_mean']:.3f}")
+
+            # Label distribution in tiers
+            label_columns = session_state.get('label_columns', [])
+            if label_columns:
+                parts.append(f"\n### Critical Label Coverage in Tier 1")
+                critical_labels = ['Just_Happens', 'Technical_Specialist', 'Divination',
+                                   'Rule_Violation_Taboo', 'Priest_High_Religion']
+
+                for label in critical_labels:
+                    if label in label_columns:
+                        count = (tier1_dataset[label] == 1).sum()
+                        parts.append(f"- {label}: {count} examples")
+
+        return "\n".join(parts)
 
     def send_message(
         self,
@@ -500,18 +684,34 @@ def format_usage_stats(usage: Dict[str, int]) -> str:
     return " | ".join(parts)
 
 
+
+
 def render_chat_page(session_state: Dict[str, Any]):
     """Render chat interface"""
-    st.markdown("## 💬 AI Assistant")
+    st.markdown("## 💬 AI Assistant with Multi-Model Comparison")
 
     # Check if data loaded
     if not session_state.get('initialized', False):
         st.info("💡 Load a dataset first to enable full assistant capabilities")
 
+    # Show loaded models count
+    loaded_models = session_state.get('loaded_models', {})
+    if loaded_models:
+        st.success(f"✅ {len(loaded_models)} model(s) loaded - Can compare predictions!")
+        with st.expander("📋 Loaded Models"):
+            for model_name, loader in loaded_models.items():
+                info = loader.get_model_info()
+                if info:
+                    config = info.get('config', {})
+                    test_f1 = info.get('test_results', {}).get('eval_f1_micro')
+                    hierarchy_type = 'Hierarchical' if config.get('use_hierarchy') else 'Flat'
+                    f1_str = f"{test_f1:.3f}" if test_f1 else "N/A"
+                    st.caption(f"**{model_name}**: {hierarchy_type} | F1: {f1_str}")
+
     if 'chat_assistant' not in session_state:
         try:
             session_state['chat_assistant'] = HRAFChatAssistant()
-            st.success("✅ Claude Sonnet 4.5 with full corpus access")
+            st.success("✅ Claude Sonnet 4.5 with full corpus and multi-model access")
         except ValueError as e:
             st.error(f"❌ {e}")
             st.info("Set ANTHROPIC_API_KEY in .env")
@@ -555,6 +755,10 @@ def render_chat_page(session_state: Dict[str, Any]):
             if st.button("What labels co-occur most?"):
                 st.session_state['suggested_q'] = "Which labels most frequently appear together?"
                 st.rerun()
+            if loaded_models:
+                if st.button("Compare loaded models"):
+                    st.session_state['suggested_q'] = "Compare the configurations and performance of all loaded models. Which one should I use?"
+                    st.rerun()
 
         with col2:
             if st.button("Analyze Rule_Violation_Taboo"):
@@ -563,6 +767,10 @@ def render_chat_page(session_state: Dict[str, Any]):
             if st.button("Compare Illness vs Accident"):
                 st.session_state['suggested_q'] = "Compare the Illness and Accident labels - differences, examples, scores"
                 st.rerun()
+            if loaded_models and len(loaded_models) > 1:
+                if st.button("Test passage on all models"):
+                    st.session_state['suggested_q'] = "Pick an interesting passage and run predictions with all loaded models. Show me where they agree and disagree."
+                    st.rerun()
 
         st.markdown("---")
 
@@ -586,7 +794,7 @@ def render_chat_page(session_state: Dict[str, Any]):
         user_message = session_state['suggested_q']
         session_state['suggested_q'] = None
     else:
-        user_message = st.chat_input("Ask about your data...")
+        user_message = st.chat_input("Ask about your data or compare models...")
 
     if user_message:
         session_state['chat_history'].append({
@@ -626,7 +834,7 @@ def render_chat_page(session_state: Dict[str, Any]):
 
                         # Show if data was injected
                         if result.get('enhanced_message'):
-                            st.caption("ℹ️ Answer includes actual passage/label data")
+                            st.caption("ℹ️ Answer includes actual passage/label data and model comparisons")
 
                     session_state['chat_history'].append({
                         "role": "assistant",

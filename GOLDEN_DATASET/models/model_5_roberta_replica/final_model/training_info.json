@@ -1,0 +1,153 @@
+{
+  "label_structure": {
+    "EVENT": {
+      "main_label": "EVENT",
+      "sublabels": [
+        "EVENT_Illness",
+        "EVENT_Accident",
+        "EVENT_Other"
+      ],
+      "enabled": true
+    },
+    "CAUSE": {
+      "main_label": "CAUSE",
+      "sublabels": [
+        "CAUSE_Material_Physical",
+        "CAUSE_Spirits_Gods",
+        "CAUSE_Witchcraft_Sorcery",
+        "CAUSE_Rule_Violation_Taboo"
+      ],
+      "enabled": true
+    },
+    "ACTION": {
+      "main_label": "ACTION",
+      "sublabels": [
+        "ACTION_Physical_Material",
+        "ACTION_Technical_Specialist",
+        "ACTION_Divination",
+        "ACTION_Shaman_Medium_Healer",
+        "ACTION_Priest_High_Religion"
+      ],
+      "enabled": true
+    }
+  },
+  "training_config": {
+    "num_epochs": 15,
+    "batch_size": 16,
+    "gradient_accumulation_steps": 1,
+    "learning_rate": 2e-05,
+    "warmup_steps": 500,
+    "weight_decay": 0.01,
+    "max_length": 512,
+    "eval_steps": 100,
+    "save_steps": 500,
+    "logging_steps": 50,
+    "early_stopping_patience": 5,
+    "label_smoothing": 0.0
+  },
+  "data_config": {
+    "excel_path": "data/_Altogether_Dataset_RACoded_Combined.xlsx",
+    "test_size": 0.2,
+    "validation_size": 0.1,
+    "random_seed": 42,
+    "stratify_by": "EVENT"
+  },
+  "optimal_thresholds": {
+    "EVENT_Illness": {
+      "threshold": 0.6,
+      "f1": 0.8734835355285961,
+      "default_f1": 0.8703597944031982
+    },
+    "EVENT_Accident": {
+      "threshold": 0.3,
+      "f1": 0.539568345323741,
+      "default_f1": 0.4896265560165975
+    },
+    "EVENT_Other": {
+      "threshold": 0.3,
+      "f1": 0.6126447016918967,
+      "default_f1": 0.5922233300099701
+    },
+    "CAUSE_Material_Physical": {
+      "threshold": 0.4,
+      "f1": 0.5051698670605613,
+      "default_f1": 0.4822934232715008
+    },
+    "CAUSE_Spirits_Gods": {
+      "threshold": 0.5,
+      "f1": 0.6650306748466258,
+      "default_f1": 0.6650306748466258
+    },
+    "CAUSE_Witchcraft_Sorcery": {
+      "threshold": 0.3,
+      "f1": 0.6204081632653061,
+      "default_f1": 0.5876777251184834
+    },
+    "CAUSE_Rule_Violation_Taboo": {
+      "threshold": 0.3,
+      "f1": 0.4918032786885246,
+      "default_f1": 0.43260188087774293
+    },
+    "ACTION_Physical_Material": {
+      "threshold": 0.4,
+      "f1": 0.7050461975835111,
+      "default_f1": 0.6954612005856515
+    },
+    "ACTION_Technical_Specialist": {
+      "threshold": 0.5,
+      "f1": 0.4,
+      "default_f1": 0.4
+    },
+    "ACTION_Divination": {
+      "threshold": 0.3,
+      "f1": 0.09523809523809523,
+      "default_f1": 0.0
+    },
+    "ACTION_Shaman_Medium_Healer": {
+      "threshold": 0.4,
+      "f1": 0.535031847133758,
+      "default_f1": 0.4868913857677903
+    },
+    "ACTION_Priest_High_Religion": {
+      "threshold": 0.3,
+      "f1": 0.14893617021276595,
+      "default_f1": 0.0
+    }
+  },
+  "test_results": {
+    "eval_loss": 0.290056437253952,
+    "eval_f1_micro": 0.6489684028278747,
+    "eval_f1_macro": 0.4751804975747967,
+    "eval_f1_main_avg": NaN,
+    "eval_f1_EVENT_Illness": 0.8703597944031982,
+    "eval_f1_EVENT_Accident": 0.4896265560165975,
+    "eval_f1_EVENT_Other": 0.5922233300099701,
+    "eval_f1_CAUSE_Material_Physical": 0.4822934232715008,
+    "eval_f1_CAUSE_Spirits_Gods": 0.6650306748466258,
+    "eval_f1_CAUSE_Witchcraft_Sorcery": 0.5876777251184834,
+    "eval_f1_CAUSE_Rule_Violation_Taboo": 0.43260188087774293,
+    "eval_f1_ACTION_Physical_Material": 0.6954612005856515,
+    "eval_f1_ACTION_Technical_Specialist": 0.4,
+    "eval_f1_ACTION_Divination": 0.0,
+    "eval_f1_ACTION_Shaman_Medium_Healer": 0.4868913857677903,
+    "eval_f1_ACTION_Priest_High_Religion": 0.0,
+    "eval_runtime": 41.7261,
+    "eval_samples_per_second": 49.705,
+    "eval_steps_per_second": 3.116,
+    "epoch": 15.0
+  },
+  "class_weights": [
+    1.464226245880127,
+    14.245588302612305,
+    2.839629650115967,
+    4.867006301879883,
+    4.341061115264893,
+    14.803353309631348,
+    8.817234992980957,
+    2.1048219203948975,
+    13.499300956726074,
+    44.07391357421875,
+    11.958749771118164,
+    28.039215087890625
+  ]
+}
