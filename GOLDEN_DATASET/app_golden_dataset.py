@@ -8,9 +8,8 @@ import pandas as pd
 import numpy as np
 import json
 import matplotlib.pyplot as plt
-from model_inference import HRAFModelLoader
-from chat_assistant import render_chat_page
 import seaborn as sns
+from dotenv import load_dotenv
 import os
 import pickle
 from pathlib import Path
@@ -19,8 +18,11 @@ import io
 from tqdm import tqdm
 
 from discovery_architecture import GoldenDatasetFinder
+from model_training import render_training_page
+from model_inference import HRAFModelLoader
+from chat_assistant import render_chat_page
+from data_preparation import render_data_preparation_page
 
-from dotenv import load_dotenv
 
 # Page config
 st.set_page_config(
@@ -1123,6 +1125,47 @@ def _display_multi_model_comparison(model_results, actual_labels, label_columns)
     )
 
 
+def load_data(filename, header_row=0, passage_col_override=None):
+    """Load Excel data with flexible header handling"""
+    try:
+        df = pd.read_excel(filename, header=header_row)
+
+        # Flatten column names if multi-level
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = ['_'.join(map(str, col)).strip('_') for col in df.columns.values]
+            print(f"Flattened multi-level columns")
+
+        # Clean column names
+        df.columns = [str(col).strip() for col in df.columns]
+
+        passage_col = passage_col_override if passage_col_override else detect_passage_column(df)
+        if not passage_col:
+            return None, None, None, None, None, None
+
+        finder = GoldenDatasetFinder(
+            voyage_api_key=VOYAGE_API_KEY,
+            pinecone_api_key=PINECONE_API_KEY,
+            index_name=INDEX_NAME,
+            region=REGION
+        )
+
+        label_columns = finder._auto_detect_label_columns(df)
+
+        namespace = get_namespace_from_filename(filename)
+
+        cache_file = get_cache_filename(filename)
+        cache = None
+        if os.path.exists(cache_file):
+            with open(cache_file, 'rb') as f:
+                cache = pickle.load(f)
+
+        return df, finder, label_columns, cache, passage_col, namespace
+
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return None, None, None, None, None, None
+
+
 def _run_inference_on_passage_multi_model(idx, text, actual_labels_list, label_columns):
     """Run inference on a single passage with all loaded models"""
 
@@ -1921,14 +1964,18 @@ else:
 
     # Use session state for current page if set, otherwise default
     if st.session_state.current_page:
-        default_index = ["📊 Overview", "💻 Compute Scores", "🔍 Search", "⚙️ Thresholds", "📦 Tiers", "🤖 Model Inference", "💬 Chat", "💾 Export"].index(st.session_state.current_page)
+        page_list = ["📊 Overview", "💻 Compute Scores", "🔍 Search", "🛠️ Data Prep", "🎓 Train Model", "🤖 Model Inference",
+                     "💬 Chat"]
+        try:
+            default_index = page_list.index(st.session_state.current_page)
+        except ValueError:
+            default_index = 0
     else:
         default_index = 0
 
     page = st.radio(
         "Navigate",
-        ["📊 Overview", "💻 Compute Scores", "🔍 Search", "⚙️ Thresholds", "📦 Tiers", "🤖 Model Inference", "💬 Chat",
-         "💾 Export"],
+        ["📊 Overview", "💻 Compute Scores", "🔍 Search", "🛠️ Data Prep", "🎓 Train Model", "🤖 Model Inference", "💬 Chat"],
         horizontal=True,
         label_visibility="visible",
         index=default_index
@@ -2035,165 +2082,139 @@ else:
         else:
             st.info("💡 No scores computed yet. Go to 'Compute Scores' to generate them.")
 
+
     elif page == "💻 Compute Scores":
+
         st.markdown("## 💻 Compute Quality Scores")
 
         df = st.session_state.df
+
         finder = st.session_state.finder
+
         all_label_columns = st.session_state.label_columns
+
         selected_file = st.session_state.selected_file
+
         namespace = st.session_state.get('namespace', 'default')
+
         cache_file = get_cache_filename(selected_file)
 
         # Configuration section
+
         st.markdown("### ⚙️ Configuration")
+
+        st.info("💡 **Tip**: Files exported from Data Prep have standardized single-row headers")
 
         col1, col2 = st.columns(2)
 
         with col1:
+
             header_row = st.number_input(
-                "Header row:",
+
+                "Header row (0=first row):",
+
                 min_value=0,
+
                 max_value=5,
-                value=1,
-                help="0=first row, 1=second row"
+
+                value=0,  # Changed default to 0 for single header
+
+                help="Use 0 for exported files, 1 for original HRAF multi-header files"
+
             )
 
             # Detect passage column with current settings
+
             temp_df = pd.read_excel(selected_file, header=header_row)
+
+            # Flatten columns if multi-level
+
+            if isinstance(temp_df.columns, pd.MultiIndex):
+                temp_df.columns = ['_'.join(map(str, col)).strip('_') for col in temp_df.columns.values]
+
             detected_col = detect_passage_column(temp_df)
 
             passage_col_override = st.text_input(
+
                 "Passage column:",
+
                 value=detected_col if detected_col else "",
+
                 placeholder="e.g., Passage",
+
                 help="Auto-detected, but you can override"
+
             )
 
         with col2:
+
             st.markdown("**Select labels to compute:**")
+
+            # Try to auto-detect labels from temp_df
+
+            auto_labels = []
+
+            for col in temp_df.columns:
+
+                if col != detected_col and temp_df[col].dtype in ['int64', 'float64']:
+
+                    unique_vals = temp_df[col].dropna().unique()
+
+                    if len(unique_vals) <= 2 and set(unique_vals).issubset({0, 1, 0.0, 1.0}):
+
+                        if (temp_df[col] == 1).sum() > 0:
+                            auto_labels.append(col)
+
             selected_labels = st.multiselect(
+
                 "Labels to compute",
-                options=all_label_columns,
-                default=all_label_columns,
+
+                options=auto_labels if auto_labels else all_label_columns,
+
+                default=auto_labels if auto_labels else all_label_columns,
+
                 label_visibility="collapsed",
+
                 help="Choose which labels to include in computation"
+
             )
 
         # Reload data if settings changed
+
         if st.button("↻ Apply Settings", type="secondary"):
+
             with st.spinner("Reloading..."):
+
                 df, finder, label_columns, cache, passage_col, namespace = load_data(
+
                     selected_file,
+
                     header_row=header_row,
+
                     passage_col_override=passage_col_override if passage_col_override else None
+
                 )
 
                 if df is not None:
                     # Filter to selected labels
+
                     label_columns = [l for l in label_columns if l in selected_labels]
 
                     st.session_state.df = df
+
                     st.session_state.finder = finder
+
                     st.session_state.label_columns = label_columns
+
                     st.session_state.cache = cache
+
                     st.session_state.passage_col = passage_col
+
                     st.session_state.namespace = namespace
+
                     st.success("✅ Settings applied!")
+
                     st.rerun()
-
-        st.markdown("---")
-
-        # Use current label columns (filtered if settings were applied)
-        label_columns = st.session_state.label_columns
-        passage_col = st.session_state.get('passage_col', 'Passage')
-
-        st.markdown("""
-        ### What This Does
-        
-        Computes two quality scores for each passage:
-        
-        1. **Consistency Score** - Agreement with similar passages (0-1)
-        2. **Rerank Score** - Relevance to label definition (0-1)
-        
-        Results saved to `data/cached_scores/`
-        """)
-
-        num_passages = df[passage_col].notna().sum()
-        num_labels_to_rerank = sum(df[col].sum() for col in label_columns)
-
-        avg_passage_length = df[passage_col].dropna().astype(str).str.len().mean()
-        est_tokens = (num_passages * avg_passage_length) / 4
-        embedding_cost = (est_tokens / 1_000_000) * 0.10
-        rerank_cost = (num_labels_to_rerank * 200 / 1000) * 0.00005
-        total_cost = embedding_cost + rerank_cost
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Passages", num_passages)
-        with col2:
-            st.metric("Labels", len(label_columns))
-        with col3:
-            st.metric("Est. Cost", f"${total_cost:.2f}")
-
-        st.info(f"💡 Estimated time: {int(num_passages / 200)} - {int(num_passages / 150)} minutes")
-
-        if os.path.exists(cache_file):
-            cache_date = datetime.fromtimestamp(os.path.getmtime(cache_file))
-            st.warning(f"⚠️ Cached scores exist (from {cache_date.strftime('%Y-%m-%d %H:%M')})")
-
-        with st.expander("⚙️ Advanced Settings"):
-            k_similar = st.slider("Similar passages to check:", 5, 30, 15)
-
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            compute_button = st.button("🚀 Compute", type="primary")
-        with col2:
-            if os.path.exists(cache_file):
-                if st.button("🔄 Recompute", type="secondary"):
-                    compute_button = True
-
-        if compute_button:
-            try:
-                st.markdown("---")
-
-                with st.spinner("Computing scores..."):
-                    cache = compute_scores_for_dataset(
-                        df, finder, label_columns, passage_col,
-                        namespace, k_similar
-                    )
-
-                st.write("### Step 5: Saving Cache")
-                with open(cache_file, 'wb') as f:
-                    pickle.dump(cache, f)
-
-                excel_name = Path(cache_file).stem + '.xlsx'
-                excel_file = CACHE_DIR / excel_name
-                cache['df_summary'].to_excel(excel_file, index=False)
-
-                st.success(f"✅ Saved to: {Path(cache_file).name}")
-
-                st.session_state.cache = cache
-
-                st.markdown("---")
-                st.markdown("### 📊 Summary")
-                scores_df = cache['df_summary']
-
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Scored", len(scores_df))
-                with col2:
-                    st.metric("Avg Consistency", f"{scores_df['consistency_avg'].mean():.3f}")
-                with col3:
-                    st.metric("Avg Rerank", f"{scores_df['rerank_avg'].mean():.3f}")
-
-                st.success("✅ Complete! Go to Overview or Thresholds to see results.")
-
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
-                import traceback
-                with st.expander("📋 Error Details"):
-                    st.code(traceback.format_exc())
 
     elif page == "🔍 Search":
         st.markdown("## 🔍 Enhanced Search")
@@ -3010,6 +3031,9 @@ else:
 
                     st.pyplot(fig)
 
+    elif page == "🛠️ Data Prep":
+        render_data_preparation_page(st.session_state)
+
     elif page == "🤖 Model Inference":
 
         st.markdown("## 🤖 Model Inference Testing")
@@ -3276,8 +3300,8 @@ else:
     elif page == "💬 Chat":
         render_chat_page(st.session_state)
 
-        # Replace the "💾 Export" page section in app_golden_dataset.py
-
+    elif page == "🎓 Train Model":
+        render_training_page(st.session_state)
 
     elif page == "💾 Export":
 
