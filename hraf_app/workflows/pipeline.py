@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import pickle
 
-from core.quality import QualityScorer, PassageQuality
-from core.training import ModelTrainer
 from core.experiments import ExperimentTracker
+from core.quality import PassageQuality, QualityScorer
+from core.training import ModelTrainer
 from workflows.active_learning import ActiveLearner
 
 
@@ -146,32 +146,47 @@ class HRAFPipeline:
     def load_data(
             self,
             filepath: str,
-            passage_col: str = None,
-            label_columns: List[str] = None
+            passage_col: str,
+            label_columns: List[str],
+            header_row: int = 0
     ) -> Dict:
         """
-        Load and validate dataset
+        Load and validate dataset with explicit column specification
+
+        Args:
+            filepath: Path to Excel file
+            passage_col: Name of passage column
+            label_columns: List of label column names
+            header_row: Which row contains headers (0-indexed)
 
         Returns:
             Dict with validation results
         """
-        df = pd.read_excel(filepath)
+        print(f"\n📂 Loading data from {filepath}")
 
-        # Auto-detect passage column
-        if passage_col is None:
-            passage_col = self._detect_passage_column(df)
+        # Load data with correct header row
+        df = pd.read_excel(filepath, header=header_row)
+        print(f"✅ Loaded {len(df)} rows, {len(df.columns)} columns")
+        print(f"✅ Used header row: {header_row}")
+        print(f"✅ Columns: {list(df.columns)}")
 
+        # Validate passage column exists
         if passage_col not in df.columns:
-            raise ValueError(f"Passage column '{passage_col}' not found")
+            available = ', '.join([f"'{col}'" for col in df.columns])
+            raise ValueError(
+                f"Passage column '{passage_col}' not found in file.\n"
+                f"Available columns: {available}"
+            )
 
-        # Auto-detect label columns
-        if label_columns is None:
-            label_columns = self._detect_label_columns(df)
+        # Validate label columns exist
+        missing_labels = [col for col in label_columns if col not in df.columns]
+        if missing_labels:
+            raise ValueError(f"Label columns not found: {', '.join(missing_labels)}")
 
-        if not label_columns:
-            raise ValueError("No binary label columns found")
+        print(f"✅ Using passage column: '{passage_col}'")
+        print(f"✅ Using {len(label_columns)} label columns")
 
-        # Validate
+        # Validate data
         validation = self._validate_data(df, passage_col, label_columns)
 
         # Store
@@ -185,36 +200,112 @@ class HRAFPipeline:
 
     def _detect_passage_column(self, df: pd.DataFrame) -> str:
         """Auto-detect passage column"""
-        candidates = ['Passage', 'passage', 'Text', 'text', 'Content']
+        candidates = ['Passage', 'passage', 'Text', 'text', 'Content', 'content']
 
+        # Check exact matches first
         for col in candidates:
             if col in df.columns:
+                print(f"  ✓ Found passage column: '{col}'")
+                return col
+
+        # Look for case-insensitive matches
+        cols_lower = {col.lower(): col for col in df.columns}
+        for candidate in candidates:
+            if candidate.lower() in cols_lower:
+                col = cols_lower[candidate.lower()]
+                print(f"  ✓ Found passage column: '{col}'")
                 return col
 
         # Look for long text columns
+        print("  Searching for long text columns...")
         for col in df.columns:
             if df[col].dtype == 'object':
-                avg_len = df[col].dropna().astype(str).str.len().mean()
-                if avg_len > 100:
-                    return col
+                try:
+                    non_null = df[col].dropna()
+                    if len(non_null) > 0:
+                        avg_len = non_null.astype(str).str.len().mean()
+                        if avg_len > 100:  # Passages typically >100 chars
+                            print(f"  ✓ Found passage column (by length): '{col}' (avg: {avg_len:.0f} chars)")
+                            return col
+                except:
+                    continue
 
-        raise ValueError("Could not detect passage column")
+        raise ValueError(
+            "Could not detect passage column. Please specify passage_col manually.\n"
+            f"Available columns: {', '.join(df.columns[:10])}"
+        )
 
-    def _detect_label_columns(self, df: pd.DataFrame) -> List[str]:
-        """Auto-detect binary label columns"""
+    def _detect_label_columns(self, df: pd.DataFrame, auto_exclude_obvious: bool = True) -> List[str]:
+        """
+        Auto-detect binary label columns
+
+        Args:
+            auto_exclude_obvious: Automatically exclude obvious non-label columns
+        """
         label_cols = []
+        potential_labels = []
 
-        exclude = {'ID', 'Passage', 'Text', 'Description', 'Culture', 'Region'}
+        # Minimal exclusions - only truly obvious metadata
+        obvious_metadata = {
+            'id', 'passage', 'text', 'content'  # Only 4 exclusions!
+        }
+
+        print(f"\n🔍 Detecting label columns...")
+        print(f"Total columns: {len(df.columns)}")
 
         for col in df.columns:
-            if col in exclude:
+            col_lower = str(col).lower()
+
+            # Skip obvious metadata
+            if auto_exclude_obvious and col_lower in obvious_metadata:
+                print(f"  ⊗ {col} (metadata)")
                 continue
 
-            if df[col].dtype in ['int64', 'float64']:
-                unique_vals = df[col].dropna().unique()
-                if set(unique_vals).issubset({0, 1, 0.0, 1.0}):
-                    if (df[col] == 1).sum() > 0:
-                        label_cols.append(col)
+            try:
+                # Check if column is numeric
+                if df[col].dtype in ['int64', 'float64', 'Int64', 'Float64', 'bool']:
+                    col_data = df[col]
+                else:
+                    col_data = pd.to_numeric(df[col], errors='coerce')
+
+                # Get unique values
+                unique_vals = col_data.dropna().unique()
+
+                if len(unique_vals) > 0:
+                    # Convert to set
+                    unique_set = set()
+                    for val in unique_vals:
+                        if not pd.isna(val):
+                            try:
+                                unique_set.add(float(val))
+                            except:
+                                pass
+
+                    # Check if binary
+                    is_binary = len(unique_set) > 0 and all(val in {0.0, 1.0} for val in unique_set)
+
+                    if is_binary:
+                        positive_count = int((col_data == 1).sum())
+
+                        if positive_count > 0:
+                            # Calculate statistics for this potential label
+                            total = len(col_data.dropna())
+                            pct = (positive_count / total * 100) if total > 0 else 0
+
+                            label_cols.append(col)
+                            potential_labels.append({
+                                'column': col,
+                                'positive': positive_count,
+                                'total': total,
+                                'percentage': pct
+                            })
+
+                            print(f"  ✓ {col}: {positive_count}/{total} ({pct:.1f}%)")
+
+            except Exception as e:
+                continue
+
+        print(f"\n✅ Found {len(label_cols)} binary columns")
 
         return label_cols
 
@@ -231,43 +322,81 @@ class HRAFPipeline:
             'stats': {}
         }
 
+        print("\n🔍 Validating data...")
+
         # Check missing passages
-        missing = df[passage_col].isna().sum()
+        missing = int(df[passage_col].isna().sum())
         if missing > 0:
             pct = (missing / len(df)) * 100
             validation['warnings'].append(
                 f"{missing} passages missing ({pct:.1f}%)"
             )
+            print(f"  ⚠️  {missing} missing passages ({pct:.1f}%)")
 
         # Check passage lengths
-        lengths = df[passage_col].dropna().str.len()
-        validation['stats']['passage_lengths'] = {
-            'mean': float(lengths.mean()),
-            'median': float(lengths.median()),
-            'min': int(lengths.min()),
-            'max': int(lengths.max())
-        }
+        valid_passages = df[passage_col].dropna()
+        if len(valid_passages) > 0:
+            lengths = valid_passages.astype(str).str.len()
+            validation['stats']['passage_lengths'] = {
+                'mean': float(lengths.mean()),
+                'median': float(lengths.median()),
+                'min': int(lengths.min()),
+                'max': int(lengths.max())
+            }
+            print(f"  ✓ Passage lengths: mean={lengths.mean():.0f}, median={lengths.median():.0f}")
+        else:
+            validation['warnings'].append("No valid passages found")
+            validation['stats']['passage_lengths'] = {
+                'mean': 0.0,
+                'median': 0.0,
+                'min': 0,
+                'max': 0
+            }
 
         # Check for duplicates
-        duplicates = df[passage_col].duplicated().sum()
+        duplicates = int(df[passage_col].duplicated().sum())
         if duplicates > 0:
+            pct = (duplicates / len(df)) * 100
             validation['warnings'].append(
-                f"{duplicates} duplicate passages found"
+                f"{duplicates} duplicate passages found ({pct:.1f}%)"
             )
+            print(f"  ⚠️  {duplicates} duplicates ({pct:.1f}%)")
 
         # Check label distribution
         label_stats = {}
+        print("\n  Label distribution:")
         for label in label_columns:
-            count = int((df[label] == 1).sum())
-            pct = (count / len(df)) * 100
-            label_stats[label] = {'count': count, 'percentage': pct}
+            try:
+                count = int((df[label] == 1).sum())
+                pct = (count / len(df)) * 100 if len(df) > 0 else 0
+                label_stats[label] = {'count': count, 'percentage': float(pct)}
 
-            if pct < 2:
-                validation['warnings'].append(
-                    f"Label '{label}' very rare ({count} examples, {pct:.1f}%)"
-                )
+                print(f"    {label}: {count} ({pct:.1f}%)")
+
+                if pct < 2:
+                    validation['warnings'].append(
+                        f"Label '{label}' very rare ({count} examples, {pct:.1f}%)"
+                    )
+            except Exception as e:
+                print(f"    {label}: Error - {str(e)}")
+                label_stats[label] = {'count': 0, 'percentage': 0.0}
 
         validation['stats']['label_distribution'] = label_stats
+
+        # Check for passages with no labels
+        try:
+            label_counts = df[label_columns].sum(axis=1)
+            no_labels = int((label_counts == 0).sum())
+            if no_labels > 0:
+                pct = (no_labels / len(df)) * 100
+                validation['warnings'].append(
+                    f"{no_labels} passages with no labels ({pct:.1f}%)"
+                )
+                print(f"  ⚠️  {no_labels} passages with no labels ({pct:.1f}%)")
+        except Exception as e:
+            print(f"  ⚠️  Could not check label counts: {str(e)}")
+
+        print(f"\n✅ Validation complete: {len(validation['warnings'])} warnings")
 
         return validation
 
@@ -278,16 +407,27 @@ class HRAFPipeline:
     def compute_quality(
             self,
             use_embeddings: bool = True,
-            k_similar: int = 15
+            k_similar: int = 15,
+            namespace: str = "main"
     ) -> Dict:
         """
         Compute quality scores for all passages
+
+        Workflow:
+        1. Initialize scorer
+        2. Compute embeddings ONCE and store in Pinecone
+        3. Use stored embeddings for fast similarity search
+        4. Compute quality scores
 
         Returns:
             Dict with scoring results and recommendations
         """
         if not self.has_data():
             raise RuntimeError("Load data first")
+
+        print(f"🔬 Computing quality scores...")
+        print(f"  Embeddings: {'enabled' if use_embeddings else 'disabled'}")
+        print(f"  Namespace: {namespace}")
 
         # Initialize quality scorer
         self.quality_scorer = QualityScorer(
@@ -297,8 +437,25 @@ class HRAFPipeline:
             use_embeddings=use_embeddings
         )
 
-        # Compute scores
-        quality_scores = self.quality_scorer.compute_all(k_similar=k_similar)
+        # Get valid passages
+        valid_mask = self.state.df[self.state.passage_col].notna()
+        valid_indices = self.state.df[valid_mask].index.tolist()
+
+        # PHASE 1: Compute embeddings once (stores in Pinecone)
+        if use_embeddings:
+            print(f"\n📊 Phase 1: Computing/loading embeddings...")
+            self.quality_scorer._compute_embeddings_with_progress(
+                valid_indices,
+                namespace=namespace
+            )
+            print(f"✅ Embeddings ready in Pinecone")
+
+        # PHASE 2: Compute quality scores (uses stored embeddings)
+        print(f"\n🎯 Phase 2: Computing quality scores...")
+        quality_scores = self.quality_scorer.compute_all_with_progress(
+            k_similar=k_similar,
+            namespace=namespace
+        )
 
         # Analyze distribution
         distribution = self._analyze_quality_distribution(quality_scores)
@@ -373,6 +530,66 @@ class HRAFPipeline:
     # ========================================================================
     # STEP 3: EXPLORE & FILTER
     # ========================================================================
+
+    def _analyze_selection(self, selected: Dict[int, any]) -> Dict:
+        """Analyze data selection"""
+        selected_df = self.state.df.loc[list(selected.keys())]
+
+        analysis = {
+            'num_selected': len(selected),
+            'percentage': len(selected) / len(self.state.df) * 100,
+            'avg_quality': np.mean([q.overall_quality for q in selected.values()]) if selected else 0,
+            'label_coverage': {}
+        }
+
+        # Check label coverage
+        for label in self.state.label_columns:
+            count = (selected_df[label] == 1).sum()
+            analysis['label_coverage'][label] = {
+                'count': int(count),
+                'percentage': float(count / len(selected_df) * 100) if len(selected_df) > 0 else 0
+            }
+
+        return analysis
+
+    def _apply_label_targeting(
+            self,
+            selected: Dict[int, any],
+            targets: Dict[str, int]
+    ) -> Dict[int, any]:
+        """Ensure minimum counts for specific labels"""
+        # Group by label
+        by_label = {label: [] for label in self.state.label_columns}
+
+        for idx, quality in selected.items():
+            for label in self.state.label_columns:
+                if self.state.df.loc[idx, label] == 1:
+                    by_label[label].append((idx, quality))
+
+        # Ensure targets met
+        final_selected = {}
+
+        for label, target_count in targets.items():
+            if label not in by_label:
+                continue
+
+            # Sort by quality
+            sorted_passages = sorted(
+                by_label[label],
+                key=lambda x: x[1].overall_quality if hasattr(x[1], 'overall_quality') else 0,
+                reverse=True
+            )
+
+            # Take top passages up to target
+            for idx, quality in sorted_passages[:target_count]:
+                final_selected[idx] = quality
+
+        # Add remaining high-quality passages
+        for idx, quality in selected.items():
+            if idx not in final_selected:
+                final_selected[idx] = quality
+
+        return final_selected
 
     def select_training_data(
             self,
