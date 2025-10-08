@@ -36,6 +36,9 @@ from model_inference import (
     HRAFModelLoader
 )
 
+# Import DataExperiment from data_preparation
+from data_preparation import DataExperiment
+
 
 class TrainingSession:
     """Manages a model training session"""
@@ -600,20 +603,32 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
             st.warning("No experiments found. Create experiments in Data Prep page.")
             return
 
-        # Show experiments
-        exp_names = [e['name'] for e in experiments]
-        selected_exp_name = st.selectbox("Select experiment:", exp_names)
-
-        if selected_exp_name:
-            selected_exp = next(e for e in experiments if e['name'] == selected_exp_name)
-            meta = selected_exp['metadata']
-
             # Show experiment info
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Passages", meta['statistics']['num_passages'])
+                # Handle both regular and tiered experiment metadata structures
+                if 'statistics' in meta:
+                    # Regular experiment
+                    st.metric("Passages", meta['statistics']['num_passages'])
+                elif 'tiers' in meta:
+                    # Tiered experiment - calculate total from tiers
+                    total_passages = sum(
+                        tier_data.get('count', 0)
+                        for tier_data in meta['tiers'].values()
+                    )
+                    st.metric("Passages", total_passages)
+                else:
+                    st.metric("Passages", "N/A")
+
             with col2:
-                st.metric("Labels", len(meta['statistics']['label_columns']))
+                # Handle labels
+                if 'statistics' in meta:
+                    st.metric("Labels", len(meta['statistics']['label_columns']))
+                elif 'label_columns' in meta:
+                    st.metric("Labels", len(meta['label_columns']))
+                else:
+                    st.metric("Labels", "N/A")
+
             with col3:
                 exp_type = meta.get('experiment_type', 'unknown')
                 st.metric("Type", exp_type)
@@ -638,15 +653,27 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
                 else:
                     st.warning("Curriculum learning not yet implemented")
                     return
+
+                # Update label columns from metadata
+                if 'label_columns' in meta:
+                    label_columns = meta['label_columns']
+                if 'passage_column' in meta:
+                    passage_col = meta['passage_column']
+
             else:
                 # Single dataset experiment
                 data_file = selected_exp['directory'] / "data.xlsx"
                 training_df = pd.read_excel(data_file)
                 st.info(f"Using experiment data: {len(training_df)} passages")
 
-            # Update label columns from metadata
-            label_columns = meta['statistics']['label_columns']
-            passage_col = meta['statistics']['passage_column']
+                # Update label columns from metadata
+                if 'statistics' in meta:
+                    label_columns = meta['statistics']['label_columns']
+                    passage_col = meta['statistics']['passage_column']
+                elif 'label_columns' in meta:
+                    label_columns = meta['label_columns']
+                    if 'passage_column' in meta:
+                        passage_col = meta['passage_column']
 
     elif dataset_source == "Tiered Datasets":
         tier1 = session_state.get('tier1_dataset')
