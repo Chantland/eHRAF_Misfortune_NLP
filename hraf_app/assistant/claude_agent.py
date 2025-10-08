@@ -85,8 +85,11 @@ class ProactiveAssistant:
             return None
 
         dist = pipeline.state.quality_distribution
-        elite_pct = dist['tier_percentages']['elite']
-        median = dist['median']
+
+        # Safely get tier percentages with defaults
+        elite_pct = dist.get('tier_percentages', {}).get('elite', 0)
+        good_pct = dist.get('tier_percentages', {}).get('good', 0)
+        median = dist.get('median', 0.5)
 
         if median < 0.50:
             return (
@@ -208,9 +211,11 @@ Provide concise, actionable advice.""",
 
         if pipeline.has_quality_scores():
             dist = pipeline.state.quality_distribution
+            median = dist.get('median', 0)
+            elite_pct = dist.get('tier_percentages', {}).get('elite', 0)
             context_parts.append(
-                f"- Quality: median={dist['median']:.2f}, "
-                f"{dist['tier_percentages']['elite']:.1f}% elite"
+                f"- Quality: median={median:.2f}, "
+                f"{elite_pct:.1f}% elite"
             )
 
         if pipeline.has_explored():

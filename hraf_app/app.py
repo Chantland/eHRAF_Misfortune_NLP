@@ -3,9 +3,14 @@ HRAF Quality Pipeline - Streamlined Version
 Main Streamlit Application with Guided Workflow
 """
 
+# Load environment variables FIRST - before any other imports that might need them
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 from pathlib import Path
 import sys
+import os
 
 # Add core modules to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -27,6 +32,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Verify API keys are loaded (optional but helpful for debugging)
+if not os.getenv("PINECONE_API_KEY"):
+    st.warning("⚠️ PINECONE_API_KEY not found in environment")
+if not os.getenv("VOYAGE_API_KEY"):
+    st.warning("⚠️ VOYAGE_API_KEY not found in environment")
 
 # Initialize session state
 if 'pipeline' not in st.session_state:
