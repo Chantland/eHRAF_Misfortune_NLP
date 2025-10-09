@@ -17,3 +17,4 @@ MY_TOOLS
 CONFIGURABLE_MODEL/results
 .env
 .venv
+__pycache__
