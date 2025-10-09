@@ -44,6 +44,27 @@ def render():
     if 'cache_manager' not in st.session_state:
         st.session_state.cache_manager = CacheManager()
 
+    # CRITICAL - Initialize finder on EVERY page load
+    if 'finder' not in st.session_state or st.session_state['finder'] is None:
+        from dotenv import load_dotenv
+        import os
+        load_dotenv()
+
+        # Don't catch exceptions - let them show
+        finder = GoldenDatasetFinder(
+            voyage_api_key=os.getenv("VOYAGE_API_KEY"),
+            pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+            index_name="hraf-misfortune-test",
+            region="us-east-1"
+        )
+        st.session_state['finder'] = finder
+
+    # Debug: Show finder status at top
+    if 'finder' in st.session_state:
+        st.success("✅ Finder is initialized")
+    else:
+        st.error("❌ Finder failed to initialize")
+
     # Current working object
     current_obj = st.session_state.get('current_data_object')
 
@@ -194,18 +215,28 @@ def render_new_data_loader():
     )
 
     if uploaded_file:
-        # Save temporarily
-        temp_path = Path(f"./temp/{uploaded_file.name}")
-        temp_path.parent.mkdir(exist_ok=True)
+        # Check if we already have a confirmed config
+        if 'confirmed_config' not in st.session_state:
+            st.session_state['confirmed_config'] = None
+            st.session_state['confirmed_file_bytes'] = None
 
-        with open(temp_path, 'wb') as f:
-            f.write(uploaded_file.getbuffer())
+        # Show interactive preview if config not yet confirmed
+        if st.session_state['confirmed_config'] is None:
+            config = render_interactive_data_preview(uploaded_file)
 
-        # Show interactive preview
-        config = render_interactive_data_preview(temp_path)
-
-        if config:
-            create_raw_data_object(config, temp_path)
+            # Store config when confirmed
+            if config:
+                st.session_state['confirmed_config'] = config
+                # Store the file bytes for later use
+                uploaded_file.seek(0)  # Reset to beginning
+                st.session_state['confirmed_file_bytes'] = uploaded_file.read()
+                st.rerun()
+        else:
+            # Config already confirmed, show create object UI
+            create_raw_data_object(
+                st.session_state['confirmed_config'],
+                st.session_state['confirmed_file_bytes']
+            )
 
 
 def load_data_object(name: str, stage: PipelineStage):
@@ -225,24 +256,52 @@ def load_data_object(name: str, stage: PipelineStage):
 
             # Initialize finder if needed
             if 'finder' not in st.session_state:
-                from dotenv import load_dotenv
-                import os
-                load_dotenv()
-
-                finder = GoldenDatasetFinder(
-                    voyage_api_key=os.getenv("VOYAGE_API_KEY"),
-                    pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                    index_name="hraf-misfortune-test",
-                    region="us-east-1"
-                )
-
-                st.session_state['finder'] = finder
+                initialize_finder()
 
             st.success(f"✅ Loaded: {name}")
             st.rerun()
 
         except Exception as e:
             st.error(f"❌ Error loading: {e}")
+
+
+def initialize_finder():
+    """Initialize the GoldenDatasetFinder"""
+    try:
+        from dotenv import load_dotenv
+        import os
+        load_dotenv()
+
+        voyage_key = os.getenv("VOYAGE_API_KEY")
+        pinecone_key = os.getenv("PINECONE_API_KEY")
+
+        if not voyage_key:
+            st.error("❌ VOYAGE_API_KEY not found in environment")
+            st.info("💡 Create a .env file with: VOYAGE_API_KEY=your_key_here")
+            return False
+
+        if not pinecone_key:
+            st.error("❌ PINECONE_API_KEY not found in environment")
+            st.info("💡 Add to .env file: PINECONE_API_KEY=your_key_here")
+            return False
+
+        with st.spinner("Connecting to Voyage AI and Pinecone..."):
+            finder = GoldenDatasetFinder(
+                voyage_api_key=voyage_key,
+                pinecone_api_key=pinecone_key,
+                index_name="hraf-misfortune-test",
+                region="us-east-1"
+            )
+
+            st.session_state['finder'] = finder
+            return True
+
+    except Exception as e:
+        st.error(f"❌ Error initializing finder: {e}")
+        import traceback
+        with st.expander("Error details"):
+            st.code(traceback.format_exc())
+        return False
 
 
 # ============================================================================
@@ -258,30 +317,43 @@ def make_df_display_safe(df: pd.DataFrame) -> pd.DataFrame:
     return df_safe
 
 
-def render_interactive_data_preview(filepath: Path):
+def render_interactive_data_preview(uploaded_file):
     """
     Interactive data preview with complete column control
     Click the row to set header, check boxes to select labels
+
+    Args:
+        uploaded_file: Streamlit UploadedFile object
     """
 
     st.markdown("#### 📋 Data Preview & Configuration")
     st.caption("Configure exactly which columns to use - no assumptions")
 
     # Initialize preview state
-    if 'preview_df' not in st.session_state or st.session_state.get('preview_file') != str(filepath):
-        df_raw = pd.read_excel(filepath, header=None, nrows=10)
+    file_id = f"{uploaded_file.name}_{uploaded_file.size}"
 
-        # Convert to display-safe format
-        df_raw_display = df_raw.copy()
-        for col in df_raw_display.columns:
-            df_raw_display[col] = df_raw_display[col].astype(str)
+    if 'preview_df' not in st.session_state or st.session_state.get('preview_file_id') != file_id:
+        try:
+            # Read directly from buffer for preview
+            uploaded_file.seek(0)  # Reset to beginning
+            df_raw = pd.read_excel(uploaded_file, header=None, nrows=10)
 
-        st.session_state['preview_df'] = df_raw
-        st.session_state['preview_df_display'] = df_raw_display
-        st.session_state['preview_file'] = str(filepath)
-        st.session_state['preview_header_row'] = 0
-        st.session_state['selected_columns'] = []
-        st.session_state['selected_label_columns'] = []
+            # Convert to display-safe format
+            df_raw_display = df_raw.copy()
+            for col in df_raw_display.columns:
+                df_raw_display[col] = df_raw_display[col].astype(str)
+
+            st.session_state['preview_df'] = df_raw
+            st.session_state['preview_df_display'] = df_raw_display
+            st.session_state['preview_file_id'] = file_id
+            st.session_state['preview_header_row'] = 0
+            st.session_state['selected_columns'] = []
+            st.session_state['selected_label_columns'] = []
+
+        except Exception as e:
+            st.error(f"❌ Error reading Excel file: {e}")
+            st.info("💡 Make sure the file is a valid Excel file (.xlsx or .xls)")
+            return None
 
     df_raw = st.session_state['preview_df']
     df_raw_display = st.session_state['preview_df_display']
@@ -329,11 +401,10 @@ def render_interactive_data_preview(filepath: Path):
         with cols[1]:
             # Show the row data
             row_data = df_raw_display.iloc[row_idx].tolist()
-            row_str = " | ".join([str(v)[:30] for v in row_data[:10]])  # First 10 columns
+            row_str = " | ".join([str(v)[:30] for v in row_data[:10]])
             if len(row_data) > 10:
                 row_str += " | ..."
 
-            # Highlight if selected
             if is_selected:
                 st.success(f"**{row_str}**")
             else:
@@ -341,8 +412,13 @@ def render_interactive_data_preview(filepath: Path):
 
     header_row = current_header
 
-    # Load with selected header row
-    df_preview = pd.read_excel(filepath, header=header_row, nrows=5)
+    # Load with selected header row - READ FROM BUFFER AGAIN
+    try:
+        uploaded_file.seek(0)
+        df_preview = pd.read_excel(uploaded_file, header=header_row, nrows=5)
+    except Exception as e:
+        st.error(f"❌ Error reading with header row {header_row}: {e}")
+        return None
 
     # Create display-safe version
     df_preview_display = make_df_display_safe(df_preview)
@@ -367,20 +443,16 @@ def render_interactive_data_preview(filepath: Path):
     # Smart default: look for "Passage" or "passage" first
     default_passage_col = None
 
-    # First priority: exact match "Passage"
     if "Passage" in all_columns:
         default_passage_col = "Passage"
-    # Second priority: case-insensitive "passage"
     elif "passage" in all_columns:
         default_passage_col = "passage"
-    # Third priority: contains "passage" anywhere
     else:
         for col in all_columns:
             if "passage" in str(col).lower():
                 default_passage_col = col
                 break
 
-    # Fourth priority: look for common text column names
     if default_passage_col is None:
         text_keywords = ['text', 'content', 'body', 'description']
         for keyword in text_keywords:
@@ -391,7 +463,6 @@ def render_interactive_data_preview(filepath: Path):
             if default_passage_col:
                 break
 
-    # Fifth priority: find column with longest average text
     if default_passage_col is None:
         max_length = 0
         for col in all_columns:
@@ -404,17 +475,14 @@ def render_interactive_data_preview(filepath: Path):
                 except:
                     pass
 
-    # Final fallback: first column
     if default_passage_col is None:
         default_passage_col = all_columns[0]
 
-    # Get the index for the default
     try:
         default_index = all_columns.index(default_passage_col)
     except:
         default_index = 0
 
-    # Dropdown with smart default
     passage_col = st.selectbox(
         "Which column contains the passage text?",
         options=all_columns,
@@ -423,16 +491,13 @@ def render_interactive_data_preview(filepath: Path):
         help="Select the column containing the full text passages"
     )
 
-    # Show what was auto-detected
     if passage_col == default_passage_col and default_passage_col != all_columns[0]:
         st.caption(f"💡 Auto-detected '{passage_col}' as passage column")
 
-    # Show preview of selected passage column
     if passage_col:
         st.markdown("**Passage preview:**")
         sample_passage = str(df_preview[passage_col].iloc[0])
 
-        # Show length info
         passage_lengths = df_preview[passage_col].astype(str).str.len()
         avg_length = passage_lengths.mean()
 
@@ -670,7 +735,7 @@ def render_interactive_data_preview(filepath: Path):
     st.markdown("---")
 
     # ========================================================================
-    # STEP 5: Confirm Configuration
+    # STEP 5: Review and Load
     # ========================================================================
 
     st.markdown("##### 5️⃣ Review and Load")
@@ -688,7 +753,9 @@ def render_interactive_data_preview(filepath: Path):
     with col3:
         st.metric("Total Columns", len(selected_columns) + 1)
         try:
-            full_df = pd.read_excel(filepath, header=header_row, usecols=[passage_col])
+            # Read from uploaded_file buffer to get row count
+            uploaded_file.seek(0)
+            full_df = pd.read_excel(uploaded_file, header=header_row, usecols=[passage_col])
             st.metric("Total Rows", f"{len(full_df):,}")
         except:
             st.metric("Total Rows", "Unknown")
@@ -702,7 +769,7 @@ def render_interactive_data_preview(filepath: Path):
     # Load button
     if st.button("✅ Confirm Configuration", type="primary", width='stretch'):
         return {
-            'filepath': filepath,
+            'filename': uploaded_file.name,
             'header_row': header_row,
             'passage_col': passage_col,
             'all_columns': selected_columns,
@@ -713,14 +780,15 @@ def render_interactive_data_preview(filepath: Path):
     return None
 
 
-def create_raw_data_object(config: dict, filepath: Path):
-    """Create RAW data object from configuration"""
+def create_raw_data_object(config: dict, file_bytes: bytes):
+    """Create RAW data object from configuration and file bytes"""
 
     st.markdown("---")
     st.markdown("#### 💾 Save as Data Object")
 
     # Name the object
-    default_name = f"raw_{filepath.stem}_{datetime.now().strftime('%Y%m%d')}"
+    filename = config['filename']
+    default_name = f"raw_{Path(filename).stem}_{datetime.now().strftime('%Y%m%d')}"
 
     object_name = st.text_input(
         "Data object name:",
@@ -731,8 +799,9 @@ def create_raw_data_object(config: dict, filepath: Path):
     if st.button("✅ Create RAW Data Object", type="primary"):
         with st.spinner("Creating data object..."):
             try:
-                # Load data with config
-                df = pd.read_excel(filepath, header=config['header_row'])
+                # Load data from bytes with config
+                import io
+                df = pd.read_excel(io.BytesIO(file_bytes), header=config['header_row'])
 
                 # Filter columns
                 keep_cols = [config['passage_col']] + config['all_columns']
@@ -752,7 +821,7 @@ def create_raw_data_object(config: dict, filepath: Path):
                     passage_col=config['passage_col'],
                     label_columns=config['label_columns'],
                     metadata_columns=config['metadata_columns'],
-                    source_file=str(filepath),
+                    source_file=filename,
                     header_row=config['header_row']
                 )
 
@@ -762,22 +831,13 @@ def create_raw_data_object(config: dict, filepath: Path):
                 st.session_state['current_data_object'] = data_obj
 
                 # Initialize finder
-                from dotenv import load_dotenv
-                import os
-                load_dotenv()
+                if 'finder' not in st.session_state:
+                    initialize_finder()
 
-                finder = GoldenDatasetFinder(
-                    voyage_api_key=os.getenv("VOYAGE_API_KEY"),
-                    pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                    index_name="hraf-misfortune-test",
-                    region="us-east-1"
-                )
-
-                st.session_state['finder'] = finder
-
-                # Clear preview state
-                for key in ['preview_df', 'preview_file', 'preview_header_row', 'selected_columns',
-                            'selected_label_columns', 'column_selections', 'label_selections']:
+                # Clear ALL preview state including confirmed config
+                for key in ['preview_df', 'preview_file_id', 'preview_header_row', 'selected_columns',
+                            'selected_label_columns', 'column_selections', 'label_selections',
+                            'confirmed_config', 'confirmed_file_bytes']:
                     if key in st.session_state:
                         del st.session_state[key]
 
@@ -789,7 +849,6 @@ def create_raw_data_object(config: dict, filepath: Path):
                 import traceback
                 with st.expander("Error details"):
                     st.code(traceback.format_exc())
-
 
 # ============================================================================
 # PIPELINE WORKFLOW
@@ -870,37 +929,83 @@ def render_raw_actions(obj: DataObject):
             with col2:
                 st.caption(f"−{step['impact']}")
 
-        if selected_actions:
-            st.markdown("---")
+        st.markdown("---")
 
-            # Preview impact
-            total_removed = sum(s['impact'] for s in cleaning_steps if s['action'] in selected_actions)
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Will Remove", total_removed)
-            with col2:
-                st.metric("Will Remain", len(obj.df) - total_removed)
+        # Name for cleaned object (used by both paths)
+        default_name = f"cleaned_{obj.name}_{datetime.now().strftime('%H%M')}"
+        cleaned_name = st.text_input("New object name:", value=default_name)
 
-            # Name for cleaned object
-            default_name = f"cleaned_{obj.name}_{datetime.now().strftime('%H%M')}"
-            cleaned_name = st.text_input("New object name:", value=default_name)
+        # TWO PATHS: Apply cleaning OR Skip cleaning
+        col1, col2 = st.columns(2)
 
-            if st.button("🧹 Apply Cleaning & Create CLEANED Object", type="primary"):
-                with st.spinner("Cleaning..."):
-                    df_cleaned = analyzer.apply_cleaning(selected_actions)
+        with col1:
+            # Path 1: Apply selected cleaning steps
+            if selected_actions:
+                # Preview impact
+                total_removed = sum(s['impact'] for s in cleaning_steps if s['action'] in selected_actions)
+                st.info(f"Will remove {total_removed} passages, keeping {len(obj.df) - total_removed}")
 
-                    # Create CLEANED data object
+                if st.button("🧹 Apply Cleaning", type="primary", key="apply_clean", width='stretch'):
+                    with st.spinner("Cleaning..."):
+                        df_cleaned = analyzer.apply_cleaning(selected_actions)
+
+                        # Create CLEANED data object
+                        pipeline = st.session_state.pipeline
+                        cleaned_obj = pipeline.create_cleaned(
+                            name=cleaned_name,
+                            parent_obj=obj,
+                            df_cleaned=df_cleaned,
+                            cleaning_steps=selected_actions
+                        )
+
+                        st.session_state['current_data_object'] = cleaned_obj
+                        st.success(f"✅ Created CLEANED object: {cleaned_name}")
+                        st.rerun()
+            else:
+                st.info("💡 No cleaning steps selected")
+
+        with col2:
+            # Path 2: Skip cleaning entirely
+            st.info("Skip all cleaning and proceed as-is")
+
+            if st.button("⏭️ Skip Cleaning", type="secondary", key="skip_clean", width='stretch'):
+                with st.spinner("Creating CLEANED object..."):
+                    # Create CLEANED object with no changes
                     pipeline = st.session_state.pipeline
                     cleaned_obj = pipeline.create_cleaned(
                         name=cleaned_name,
                         parent_obj=obj,
-                        df_cleaned=df_cleaned,
-                        cleaning_steps=selected_actions
+                        df_cleaned=obj.df.copy(),  # No changes
+                        cleaning_steps=["No cleaning applied"]
                     )
 
                     st.session_state['current_data_object'] = cleaned_obj
-                    st.success(f"✅ Created CLEANED object: {cleaned_name}")
+                    st.success(f"✅ Created CLEANED object (no changes): {cleaned_name}")
                     st.rerun()
+
+    else:
+        # Haven't run analysis yet - still offer skip option
+        st.markdown("---")
+        st.markdown("### Skip Analysis & Cleaning")
+
+        st.info("💡 If your data is already clean, you can skip directly to embedding")
+
+        default_name = f"cleaned_{obj.name}_{datetime.now().strftime('%H%M')}"
+        cleaned_name = st.text_input("New object name:", value=default_name, key="skip_name")
+
+        if st.button("⏭️ Skip to CLEANED Stage", type="secondary", width='stretch'):
+            with st.spinner("Creating CLEANED object..."):
+                pipeline = st.session_state.pipeline
+                cleaned_obj = pipeline.create_cleaned(
+                    name=cleaned_name,
+                    parent_obj=obj,
+                    df_cleaned=obj.df.copy(),
+                    cleaning_steps=["Skipped cleaning - data already clean"]
+                )
+
+                st.session_state['current_data_object'] = cleaned_obj
+                st.success(f"✅ Created CLEANED object (no changes): {cleaned_name}")
+                st.rerun()
 
 
 def render_cleaned_actions(obj: DataObject):
@@ -909,6 +1014,14 @@ def render_cleaned_actions(obj: DataObject):
     st.markdown("### 🔢 Generate Embeddings")
 
     st.info("Generate semantic embeddings using Voyage AI")
+
+    # Check if finder is initialized
+    if 'finder' not in st.session_state:
+        st.warning("⚠️ Initializing finder...")
+        if not initialize_finder():
+            st.error("❌ Cannot generate embeddings without finder. Check API keys in .env file.")
+            st.info("💡 Make sure you have VOYAGE_API_KEY and PINECONE_API_KEY set in your .env file")
+            return
 
     # Check cache
     cache_manager = st.session_state.cache_manager
@@ -919,8 +1032,24 @@ def render_cleaned_actions(obj: DataObject):
 
         if st.button("📂 Load Cached Embeddings"):
             embeddings = cache_manager.load_embeddings(obj.namespace)
-            obj.embeddings_cache = embeddings
-            st.success(f"✅ Loaded {len(embeddings)} cached embeddings")
+
+            # FILTER embeddings to only include passages in current dataframe
+            valid_indices = set(obj.df.index.tolist())
+            filtered_embeddings = {
+                idx: pid for idx, pid in embeddings.items()
+                if idx in valid_indices
+            }
+
+            if len(filtered_embeddings) < len(embeddings):
+                removed = len(embeddings) - len(filtered_embeddings)
+                st.info(f"ℹ️ Filtered out {removed} embeddings for removed passages")
+
+            if len(filtered_embeddings) == 0:
+                st.error("❌ No embeddings match current dataframe. Generate new embeddings instead.")
+                return
+
+            obj.embeddings_cache = filtered_embeddings
+            st.success(f"✅ Loaded {len(filtered_embeddings)} cached embeddings")
             st.rerun()
 
     batch_size = st.slider("Batch size:", 8, 64, 32)
@@ -939,6 +1068,13 @@ def render_embedded_actions(obj: DataObject):
     st.markdown("### 📊 Calculate Quality Scores")
 
     st.info("Calculate consistency and rerank scores")
+
+    # Check if finder is initialized
+    if 'finder' not in st.session_state:
+        st.warning("⚠️ Initializing finder...")
+        if not initialize_finder():
+            st.error("❌ Cannot calculate scores without finder. Check API keys in .env file.")
+            return
 
     # Check cache
     cache_manager = st.session_state.cache_manager
@@ -1116,13 +1252,42 @@ def calculate_scores(obj: DataObject, k_similar: int, scored_name: str):
     """Calculate quality scores with checkpointing"""
 
     finder = st.session_state.get('finder')
-    if finder is None:
+
+    if finder is None or st.session_state.get('finder') is None:
         st.error("❌ Finder not initialized")
+
+        # TRY TO INITIALIZE IT HERE
+        st.warning("Attempting to initialize finder now...")
+        try:
+            from dotenv import load_dotenv
+            import os
+            load_dotenv()
+
+            finder = GoldenDatasetFinder(
+                voyage_api_key=os.getenv("VOYAGE_API_KEY"),
+                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                index_name="hraf-misfortune-test",
+                region="us-east-1"
+            )
+            st.session_state['finder'] = finder
+            st.success("✅ Finder initialized! Try clicking Calculate Scores again.")
+        except Exception as e:
+            st.error(f"Failed to initialize: {e}")
         return
 
     with st.spinner("Calculating scores..."):
         try:
-            embedded_indices = list(obj.embeddings_cache.keys())
+            # Get valid indices - only those in BOTH embeddings and current df
+            valid_df_indices = set(obj.df.index.tolist())
+            embedded_indices = [
+                idx for idx in obj.embeddings_cache.keys()
+                if idx in valid_df_indices
+            ]
+
+            if not embedded_indices:
+                st.error("❌ No valid embeddings found for current dataframe")
+                st.info("💡 Generate new embeddings first")
+                return
 
             # Calculate scores
             consistency_scores = {}
@@ -1130,27 +1295,45 @@ def calculate_scores(obj: DataObject, k_similar: int, scored_name: str):
             status = st.empty()
 
             for i, idx in enumerate(embedded_indices):
-                similar = finder.find_similar_passages(
-                    query_idx=idx,
-                    k=k_similar,
-                    namespace=obj.namespace
-                )
+                try:
+                    # Find similar passages
+                    similar = finder.find_similar_passages(
+                        query_idx=idx,
+                        k=k_similar,
+                        namespace=obj.namespace
+                    )
 
-                consistency = finder.calculate_label_consistency(
-                    query_idx=idx,
-                    similar_passages=similar,
-                    label_columns=obj.label_columns,
-                    namespace=obj.namespace
-                )
+                    # CRITICAL FIX: Filter similar passages to only those in current df
+                    similar_filtered = [
+                        s for s in similar
+                        if s['passage_idx'] in valid_df_indices
+                    ]
 
-                passage_labels = [l for l in obj.label_columns if obj.df.loc[idx, l] == 1]
+                    if not similar_filtered:
+                        # No valid similar passages, use 0 consistency
+                        consistency_scores[idx] = 0.0
+                        continue
 
-                if passage_labels:
-                    avg = sum(consistency[l] for l in passage_labels) / len(passage_labels)
-                else:
-                    avg = 0.0
+                    # Calculate consistency with filtered similar passages
+                    consistency = finder.calculate_label_consistency(
+                        query_idx=idx,
+                        similar_passages=similar_filtered,
+                        label_columns=obj.label_columns,
+                        namespace=obj.namespace
+                    )
 
-                consistency_scores[idx] = avg
+                    passage_labels = [l for l in obj.label_columns if obj.df.loc[idx, l] == 1]
+
+                    if passage_labels:
+                        avg = sum(consistency[l] for l in passage_labels) / len(passage_labels)
+                    else:
+                        avg = 0.0
+
+                    consistency_scores[idx] = avg
+
+                except Exception as e:
+                    st.warning(f"⚠️ Error processing passage {idx}: {e}")
+                    consistency_scores[idx] = 0.0
 
                 # Update progress
                 pct = (i + 1) / len(embedded_indices)
