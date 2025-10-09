@@ -182,7 +182,6 @@ def calculate_label_dimensions(label_structure: Dict, predict_main_labels: bool 
 
     return dims
 
-
 def prepare_datasets(
         df: pd.DataFrame,
         label_columns: List[str],
@@ -358,6 +357,10 @@ def visualize_training_history(history: List[Dict], output_dir: Path):
     if not history:
         return None
 
+    # Ensure output directory exists
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
     # Extract metrics
@@ -411,13 +414,21 @@ def visualize_training_history(history: List[Dict], output_dir: Path):
 
     # Save
     save_path = output_dir / 'training_history.png'
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    try:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"✅ Saved training history to {save_path}")
+    except Exception as e:
+        print(f"⚠️ Could not save training history plot: {e}")
 
     return fig
 
 
 def visualize_test_results(test_results: Dict, label_names: List[str], output_dir: Path):
     """Create test results visualizations"""
+
+    # Ensure output directory exists
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Extract per-label F1 scores
     label_f1s = {}
@@ -446,48 +457,58 @@ def visualize_test_results(test_results: Dict, label_names: List[str], output_di
 
     # Per-label performance
     ax = axes[1]
-    labels = list(label_f1s.keys())
-    scores = list(label_f1s.values())
 
-    # Sort by score
-    sorted_items = sorted(zip(labels, scores), key=lambda x: x[1])
-    labels, scores = zip(*sorted_items) if sorted_items else ([], [])
+    if label_f1s:  # Only plot if we have per-label scores
+        labels = list(label_f1s.keys())
+        scores = list(label_f1s.values())
 
-    # Color based on category
-    colors = []
-    for label in labels:
-        if 'EVENT' in label:
-            colors.append('#FF6B6B')
-        elif 'CAUSE' in label:
-            colors.append('#4ECDC4')
-        elif 'ACTION' in label:
-            colors.append('#45B7D1')
-        else:
-            colors.append('#95A5A6')
+        # Sort by score
+        sorted_items = sorted(zip(labels, scores), key=lambda x: x[1])
+        labels, scores = zip(*sorted_items) if sorted_items else ([], [])
 
-    y_pos = np.arange(len(labels))
-    ax.barh(y_pos, scores, color=colors)
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(labels, fontsize=8)
-    ax.set_xlabel('F1 Score')
-    ax.set_title('F1 Score by Label')
-    ax.set_xlim(0, 1)
+        # Color based on category
+        colors = []
+        for label in labels:
+            if 'EVENT' in label or label in ['Illness', 'Accident']:
+                colors.append('#FF6B6B')
+            elif 'CAUSE' in label or label in ['Just_Happens', 'Material_Physical', 'Spirits_Gods',
+                                               'Witchcraft_Sorcery', 'Rule_Violation_Taboo']:
+                colors.append('#4ECDC4')
+            elif 'ACTION' in label or label in ['Physical_Material', 'Technical_Specialist', 'Divination',
+                                                'Shaman_Medium_Healer', 'Priest_High_Religion']:
+                colors.append('#45B7D1')
+            else:
+                colors.append('#95A5A6')
 
-    # Add score values
-    for i, (label, score) in enumerate(zip(labels, scores)):
-        ax.text(score + 0.01, i, f'{score:.3f}',
-                va='center', fontsize=8)
+        y_pos = np.arange(len(labels))
+        ax.barh(y_pos, scores, color=colors)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels, fontsize=8)
+        ax.set_xlabel('F1 Score')
+        ax.set_title('F1 Score by Label')
+        ax.set_xlim(0, 1)
 
-    ax.grid(alpha=0.3)
+        # Add score values
+        for i, (label, score) in enumerate(zip(labels, scores)):
+            ax.text(score + 0.01, i, f'{score:.3f}',
+                    va='center', fontsize=8)
+
+        ax.grid(alpha=0.3)
+    else:
+        ax.text(0.5, 0.5, 'No per-label F1 scores available',
+                ha='center', va='center', transform=ax.transAxes)
 
     plt.tight_layout()
 
     # Save
     save_path = output_dir / 'test_results.png'
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    try:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"✅ Saved test results to {save_path}")
+    except Exception as e:
+        print(f"⚠️ Could not save test results plot: {e}")
 
     return fig
-
 
 # ============================================================================
 # STREAMLIT UI COMPONENTS
@@ -581,12 +602,15 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
 
     st.markdown("### 📋 Training Configuration")
 
+    # Initialize training_df to avoid UnboundLocalError
+    training_df = None
+
     # Dataset selection
     st.markdown("#### 1️⃣ Dataset Selection")
 
     dataset_source = st.radio(
         "Data source:",
-        ["Full Dataset", "Browse Experiments", "Tiered Datasets"],  # Added Browse Experiments
+        ["Full Dataset", "Browse Experiments", "Tiered Datasets"],
         horizontal=True
     )
 
@@ -601,122 +625,140 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
 
         if not experiments:
             st.warning("No experiments found. Create experiments in Data Prep page.")
-            return
+            training_df = df  # Fallback to full dataset
+            st.info("💡 Using full dataset as fallback")
+        else:
+            # Filter options
+            exp_names = [exp['name'] for exp in experiments]
+            selected_exp_name = st.selectbox(
+                "Select experiment:",
+                exp_names,
+                key="exp_selector"
+            )
 
-            # Show experiment info
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                # Handle both regular and tiered experiment metadata structures
-                if 'statistics' in meta:
-                    # Regular experiment
-                    st.metric("Passages", meta['statistics']['num_passages'])
-                elif 'tiers' in meta:
-                    # Tiered experiment - calculate total from tiers
-                    total_passages = sum(
-                        tier_data.get('count', 0)
-                        for tier_data in meta['tiers'].values()
-                    )
-                    st.metric("Passages", total_passages)
-                else:
-                    st.metric("Passages", "N/A")
+            selected_exp = next((exp for exp in experiments if exp['name'] == selected_exp_name), None)
 
-            with col2:
-                # Handle labels
-                if 'statistics' in meta:
-                    st.metric("Labels", len(meta['statistics']['label_columns']))
-                elif 'label_columns' in meta:
-                    st.metric("Labels", len(meta['label_columns']))
-                else:
-                    st.metric("Labels", "N/A")
+            if selected_exp:
+                meta = selected_exp['metadata']
 
-            with col3:
-                exp_type = meta.get('experiment_type', 'unknown')
-                st.metric("Type", exp_type)
+                # Show experiment info
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    # Handle both regular and tiered experiment metadata structures
+                    if 'statistics' in meta:
+                        # Regular experiment
+                        st.metric("Passages", meta['statistics']['num_passages'])
+                    elif 'tiers' in meta:
+                        # Tiered experiment - calculate total from tiers
+                        total_passages = sum(
+                            tier_data.get('count', 0)
+                            for tier_data in meta['tiers'].values()
+                        )
+                        st.metric("Passages", total_passages)
+                    else:
+                        st.metric("Passages", "N/A")
 
-            # Load the experiment
-            if exp_type == 'tiered_training':
-                st.markdown("**Select tier(s) to train on:**")
-                tier_choice = st.radio(
-                    "Training data:",
-                    ["Tier 1 Only", "Tier 1 + Tier 2 Combined", "Tier 1 then Tier 2 (Curriculum)"],
-                    horizontal=True
-                )
+                with col2:
+                    # Handle labels
+                    if 'statistics' in meta:
+                        st.metric("Labels", len(meta['statistics']['label_columns']))
+                    elif 'label_columns' in meta:
+                        st.metric("Labels", len(meta['label_columns']))
+                    else:
+                        st.metric("Labels", "N/A")
 
-                if "Tier 1 Only" in tier_choice:
-                    data_file = selected_exp['directory'] / "tier1.xlsx"
-                    training_df = pd.read_excel(data_file)
-                    st.info(f"Using Tier 1: {len(training_df)} passages")
-                elif "Combined" in tier_choice:
-                    data_file = selected_exp['directory'] / "tier1_tier2_combined.xlsx"
-                    training_df = pd.read_excel(data_file)
-                    st.info(f"Using Combined: {len(training_df)} passages")
-                else:
-                    st.warning("Curriculum learning not yet implemented")
-                    return
+                with col3:
+                    exp_type = meta.get('experiment_type', 'unknown')
+                    st.metric("Type", exp_type)
 
-                # Update label columns from metadata
-                if 'label_columns' in meta:
-                    label_columns = meta['label_columns']
-                if 'passage_column' in meta:
-                    passage_col = meta['passage_column']
+                # Load the experiment
+                try:
+                    if exp_type == 'tiered_training':
+                        st.markdown("**Select tier(s) to train on:**")
+                        tier_choice = st.radio(
+                            "Training data:",
+                            ["Tier 1 Only", "Tier 1 + Tier 2 Combined", "Tier 1 then Tier 2 (Curriculum)"],
+                            horizontal=True,
+                            key="tier_choice_exp"
+                        )
 
+                        if "Tier 1 Only" in tier_choice:
+                            data_file = selected_exp['directory'] / "tier1.xlsx"
+                            training_df = pd.read_excel(data_file)
+                            st.info(f"Using Tier 1: {len(training_df)} passages")
+                        elif "Combined" in tier_choice:
+                            data_file = selected_exp['directory'] / "tier1_tier2_combined.xlsx"
+                            training_df = pd.read_excel(data_file)
+                            st.info(f"Using Combined: {len(training_df)} passages")
+                        else:
+                            st.warning("Curriculum learning not yet implemented")
+                            training_df = df  # Fallback
+                            st.info("💡 Using full dataset as fallback")
+
+                        # Update label columns from metadata
+                        if 'label_columns' in meta:
+                            label_columns = meta['label_columns']
+                        if 'passage_column' in meta:
+                            passage_col = meta['passage_column']
+
+                    else:
+                        # Single dataset experiment
+                        data_file = selected_exp['directory'] / "data.xlsx"
+                        training_df = pd.read_excel(data_file)
+                        st.info(f"Using experiment data: {len(training_df)} passages")
+
+                        # Update label columns from metadata
+                        if 'statistics' in meta:
+                            label_columns = meta['statistics']['label_columns']
+                            passage_col = meta['statistics']['passage_column']
+                        elif 'label_columns' in meta:
+                            label_columns = meta['label_columns']
+                            if 'passage_column' in meta:
+                                passage_col = meta['passage_column']
+
+                except Exception as e:
+                    st.error(f"Error loading experiment: {e}")
+                    training_df = df  # Fallback
+                    st.info("💡 Using full dataset as fallback")
             else:
-                # Single dataset experiment
-                data_file = selected_exp['directory'] / "data.xlsx"
-                training_df = pd.read_excel(data_file)
-                st.info(f"Using experiment data: {len(training_df)} passages")
-
-                # Update label columns from metadata
-                if 'statistics' in meta:
-                    label_columns = meta['statistics']['label_columns']
-                    passage_col = meta['statistics']['passage_column']
-                elif 'label_columns' in meta:
-                    label_columns = meta['label_columns']
-                    if 'passage_column' in meta:
-                        passage_col = meta['passage_column']
+                st.error("Could not load selected experiment")
+                training_df = df  # Fallback
+                st.info("💡 Using full dataset as fallback")
 
     elif dataset_source == "Tiered Datasets":
         tier1 = session_state.get('tier1_dataset')
         tier2 = session_state.get('tier2_dataset')
 
         if tier1 is None or tier2 is None:
-            st.warning("⚠️ No tiered datasets available. Create tiers first on the Tiers page.")
-            return
-
-        tier_strategy = st.selectbox(
-            "Training strategy:",
-            [
-                "Tier 1 Only (High Quality)",
-                "Tier 1 + Tier 2 (Balanced)",
-                "Sequential: Tier 1 then Tier 1+2 (Curriculum)"
-            ]
-        )
-
-        if "Tier 1 Only" in tier_strategy:
-            training_df = tier1
-            st.info(f"Using Tier 1: {len(tier1)} passages")
-        elif "Tier 1 + Tier 2" in tier_strategy:
-            training_df = pd.concat([tier1, tier2])
-            st.info(f"Using Tier 1+2: {len(training_df)} passages")
+            st.warning("⚠️ No tiered datasets available. Create tiers first on the Data Prep page.")
+            training_df = df  # Fallback
+            st.info("💡 Using full dataset as fallback")
         else:
-            st.warning("Curriculum learning not yet implemented")
-            return
+            tier_strategy = st.selectbox(
+                "Training strategy:",
+                [
+                    "Tier 1 Only (High Quality)",
+                    "Tier 1 + Tier 2 (Balanced)",
+                    "Sequential: Tier 1 then Tier 1+2 (Curriculum)"
+                ],
+                key="tier_strategy_select"
+            )
 
-    else:  # Custom Selection
-        st.markdown("**Filter passages:**")
+            if "Tier 1 Only" in tier_strategy:
+                training_df = tier1
+                st.info(f"Using Tier 1: {len(tier1)} passages")
+            elif "Tier 1 + Tier 2" in tier_strategy:
+                training_df = pd.concat([tier1, tier2])
+                st.info(f"Using Tier 1+2: {len(training_df)} passages")
+            else:
+                st.warning("Curriculum learning not yet implemented")
+                training_df = df  # Fallback
+                st.info("💡 Using full dataset as fallback")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            min_labels = st.number_input("Min labels:", 0, len(label_columns), 1)
-        with col2:
-            max_labels = st.number_input("Max labels:", min_labels, len(label_columns), len(label_columns))
-
-        # Filter by label count
-        label_counts = df[label_columns].sum(axis=1)
-        mask = (label_counts >= min_labels) & (label_counts <= max_labels)
-        training_df = df[mask]
-
-        st.info(f"Selected: {len(training_df)} passages")
+    # If training_df is still None (shouldn't happen but safety check)
+    if training_df is None:
+        st.warning("⚠️ No training dataset selected. Using full dataset.")
+        training_df = df
 
     st.markdown("---")
 
@@ -1114,6 +1156,64 @@ Files:
                 """)
 
 
+def augment_labels_with_main_categories(
+        df: pd.DataFrame,
+        label_columns: List[str],
+        predict_main_labels: bool
+) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Add synthetic main category labels if predict_main_labels=True
+
+    Main categories are inferred from sublabels:
+    - EVENT = 1 if any of [Illness, Accident, Other] = 1
+    - CAUSE = 1 if any of [Just_Happens, Material_Physical, etc.] = 1
+    - ACTION = 1 if any of [Physical_Material, Technical_Specialist, etc.] = 1
+
+    Args:
+        df: DataFrame with sublabel columns
+        label_columns: List of sublabel column names
+        predict_main_labels: Whether to add main category labels
+
+    Returns:
+        Tuple of (augmented_df, augmented_label_columns)
+    """
+    if not predict_main_labels:
+        return df, label_columns
+
+    df = df.copy()
+
+    # Define sublabel mappings
+    event_sublabels = ['Illness', 'Accident', 'Other']
+    cause_sublabels = ['Material_Physical', 'Spirits_Gods',
+                       'Witchcraft_Sorcery', 'Rule_Violation_Taboo']
+    action_sublabels = ['Physical_Material', 'Technical_Specialist', 'Divination',
+                        'Shaman_Medium_Healer', 'Priest_High_Religion']
+
+    # Create main category columns (inferred from sublabels)
+    event_cols = [col for col in label_columns if col in event_sublabels]
+    if event_cols:
+        df['EVENT'] = (df[event_cols].sum(axis=1) > 0).astype(int)
+    else:
+        df['EVENT'] = 0
+
+    cause_cols = [col for col in label_columns if col in cause_sublabels]
+    if cause_cols:
+        df['CAUSE'] = (df[cause_cols].sum(axis=1) > 0).astype(int)
+    else:
+        df['CAUSE'] = 0
+
+    action_cols = [col for col in label_columns if col in action_sublabels]
+    if action_cols:
+        df['ACTION'] = (df[action_cols].sum(axis=1) > 0).astype(int)
+    else:
+        df['ACTION'] = 0
+
+    # Prepend main categories to label_columns
+    main_labels = ['EVENT', 'CAUSE', 'ACTION']
+    augmented_label_columns = main_labels + label_columns
+
+    return df, augmented_label_columns
+
 def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns: List[str], passage_col: str):
     """Start the training process"""
 
@@ -1150,30 +1250,50 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
     output_dir = Path(f"./models/{config['experiment_name']}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # AUGMENT LABELS WITH MAIN CATEGORIES IF NEEDED
+    st.info("📋 Preparing label structure...")
+    training_df, augmented_label_columns = augment_labels_with_main_categories(
+        training_df,
+        label_columns,
+        config["predict_main_labels"]
+    )
+
+    if config["predict_main_labels"]:
+        st.success(f"✅ Added main category labels: EVENT, CAUSE, ACTION")
+        st.info(f"📊 Total labels for training: {len(augmented_label_columns)} (3 main + {len(label_columns)} sub)")
+    else:
+        st.info(f"📊 Training with {len(augmented_label_columns)} sublabels only")
+
     # Calculate label dimensions
     label_structure = {
         "EVENT": {
             "main_label": "EVENT",
-            "sublabels": [l for l in label_columns if 'EVENT' in l or l in ['Illness', 'Accident', 'Other']],
+            "sublabels": [l for l in label_columns if l in ['Illness', 'Accident', 'Other']],
             "enabled": True
         },
         "CAUSE": {
             "main_label": "CAUSE",
             "sublabels": [l for l in label_columns if
-                          'CAUSE' in l or l in ['Just_Happens', 'Material_Physical', 'Spirits_Gods',
-                                                'Witchcraft_Sorcery', 'Rule_Violation_Taboo']],
+                          l in ['Just_Happens', 'Material_Physical', 'Spirits_Gods',
+                                'Witchcraft_Sorcery', 'Rule_Violation_Taboo', 'Other.1']],
             "enabled": True
         },
         "ACTION": {
             "main_label": "ACTION",
             "sublabels": [l for l in label_columns if
-                          'ACTION' in l or l in ['Physical_Material', 'Technical_Specialist', 'Divination',
-                                                 'Shaman_Medium_Healer', 'Priest_High_Religion']],
+                          l in ['Physical_Material', 'Technical_Specialist', 'Divination',
+                                'Shaman_Medium_Healer', 'Priest_High_Religion', 'Other.2']],
             "enabled": True
         }
     }
 
     label_dims = calculate_label_dimensions(label_structure, config["predict_main_labels"])
+
+    st.info(f"🏗️ Model will predict {label_dims['total_labels']} labels: "
+            f"{label_dims['num_main_labels']} main + "
+            f"{label_dims['num_event_labels']} EVENT + "
+            f"{label_dims['num_cause_labels']} CAUSE + "
+            f"{label_dims['num_action_labels']} ACTION")
 
     # Initialize training session
     training_session = TrainingSession(config, str(output_dir))
@@ -1182,11 +1302,11 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         model_info = training_session.initialize_model(label_dims)
         st.success(f"✅ Model initialized: {model_info['trainable_params']:,} trainable parameters")
 
-    # Prepare datasets
+    # Prepare datasets - USE AUGMENTED COLUMNS
     with st.spinner("Preparing datasets..."):
         train_dataset, val_dataset, test_dataset = prepare_datasets(
             training_df,
-            label_columns,
+            augmented_label_columns,  # USE AUGMENTED
             passage_col,
             {
                 "test_size": config["test_size"],
@@ -1200,10 +1320,12 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
 
         st.success(f"✅ Datasets prepared: {len(train_dataset)} train, {len(val_dataset)} val, {len(test_dataset)} test")
 
-    # Calculate class weights
+    # Calculate class weights - USE AUGMENTED COLUMNS
     class_weights = None
     if config["use_weighted_loss"]:
-        class_weights = calculate_class_weights(training_df, label_columns)
+        with st.spinner("Calculating class weights..."):
+            class_weights = calculate_class_weights(training_df, augmented_label_columns)
+            st.info(f"📊 Using weighted loss for {len(augmented_label_columns)} labels")
 
     # Training arguments
     training_args = TrainingArguments(
@@ -1229,7 +1351,7 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         remove_unused_columns=False,
     )
 
-    # Initialize trainer
+    # Initialize trainer - USE AUGMENTED COLUMNS
     trainer = HierarchicalTrainer(
         model=training_session.model,
         args=training_args,
@@ -1237,7 +1359,7 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         eval_dataset=val_dataset,
         tokenizer=training_session.tokenizer,
         data_collator=DataCollatorWithPadding(training_session.tokenizer),
-        compute_metrics=compute_metrics_for_trainer(label_columns),
+        compute_metrics=compute_metrics_for_trainer(augmented_label_columns),  # USE AUGMENTED
         class_weights=class_weights,
         teacher_forcing_ratio=config["teacher_forcing_ratio"],
     )
@@ -1245,12 +1367,20 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
     # Train
     session_state['training_active'] = True
     session_state['training_history'] = []
+    session_state['current_epoch'] = 0
 
     st.info("🎓 Training started...")
 
     try:
+        # Create progress placeholder
+        progress_placeholder = st.empty()
+        status_placeholder = st.empty()
+
         with st.spinner("Training in progress..."):
-            trainer.train()
+            # Train the model
+            train_result = trainer.train()
+
+            status_placeholder.success("✅ Training completed!")
 
         # Get training history
         history = []
@@ -1259,11 +1389,16 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
                 history.append(log)
 
         session_state['training_history'] = history
+        session_state['current_epoch'] = config["num_epochs"]
 
         # Evaluate on test set
         st.info("📊 Evaluating on test set...")
         test_results = trainer.evaluate(eval_dataset=test_dataset)
         session_state['test_results'] = test_results
+
+        # Display test results
+        st.success(f"✅ Test F1 Micro: {test_results.get('eval_f1_micro', 0):.3f}")
+        st.success(f"✅ Test F1 Macro: {test_results.get('eval_f1_macro', 0):.3f}")
 
         # Save model
         st.info("💾 Saving model...")
@@ -1271,22 +1406,58 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         training_session.model.save_pretrained(final_model_path)
         training_session.tokenizer.save_pretrained(final_model_path)
 
-        # Save training info
+        # Save training info with augmented label information
         training_info = {
             'config': config,
             'test_results': {k: float(v) if isinstance(v, (np.float32, np.float64)) else v
                              for k, v in test_results.items()},
             'label_structure': label_structure,
+            'label_columns': augmented_label_columns,  # Save augmented columns
+            'original_label_columns': label_columns,  # Keep original for reference
             'model_info': model_info,
-            'training_completed': datetime.now().isoformat()
+            'training_completed': datetime.now().isoformat(),
+            'dataset_size': {
+                'train': len(train_dataset),
+                'val': len(val_dataset),
+                'test': len(test_dataset)
+            }
         }
 
         with open(final_model_path / "training_info.json", "w") as f:
             json.dump(training_info, f, indent=2)
 
+        st.success(f"✅ Model saved to: {final_model_path}")
+
         # Create visualizations
-        visualize_training_history(history, output_dir)
-        visualize_test_results(test_results, label_columns, output_dir)
+        st.info("📊 Creating visualizations...")
+
+        try:
+            viz_fig = visualize_training_history(history, output_dir)
+            if viz_fig:
+                st.success("✅ Training history plot saved")
+        except Exception as e:
+            st.warning(f"⚠️ Could not create training history plot: {e}")
+
+        try:
+            results_fig = visualize_test_results(test_results, augmented_label_columns, output_dir)
+            if results_fig:
+                st.success("✅ Test results plot saved")
+        except Exception as e:
+            st.warning(f"⚠️ Could not create test results plot: {e}")
+
+        # Save experiment info to parent directory
+        experiment_info = {
+            'experiment_name': config['experiment_name'],
+            'created_at': datetime.now().isoformat(),
+            'config': config,
+            'test_results': test_results,
+            'label_structure': label_structure,
+            'model_path': str(final_model_path),
+            'training_completed': True
+        }
+
+        with open(output_dir / "experiment_info.json", "w") as f:
+            json.dump(experiment_info, f, indent=2)
 
         session_state['training_complete'] = True
         session_state['training_output_dir'] = output_dir
@@ -1294,11 +1465,49 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         st.success("✅ Training completed successfully!")
         st.balloons()
 
+        # Show summary
+        st.markdown("---")
+        st.markdown("### 🎉 Training Summary")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric("Final F1 Micro", f"{test_results.get('eval_f1_micro', 0):.3f}")
+        with col2:
+            st.metric("Final F1 Macro", f"{test_results.get('eval_f1_macro', 0):.3f}")
+        with col3:
+            st.metric("Total Epochs", config["num_epochs"])
+
+        st.info(f"💾 Model saved to: `{final_model_path}`")
+        st.info(f"📊 View detailed results in the **Results** tab")
+
     except Exception as e:
         st.error(f"❌ Training failed: {e}")
         import traceback
         with st.expander("Error details"):
             st.code(traceback.format_exc())
 
+        # Try to save partial results
+        try:
+            st.info("💾 Attempting to save partial training state...")
+
+            if session_state.get('training_history'):
+                history = session_state['training_history']
+
+                partial_info = {
+                    'config': config,
+                    'training_history': history,
+                    'error': str(e),
+                    'failed_at': datetime.now().isoformat()
+                }
+
+                with open(output_dir / "partial_training.json", "w") as f:
+                    json.dump(partial_info, f, indent=2)
+
+                st.success(f"✅ Partial results saved to {output_dir}")
+        except:
+            pass
+
     finally:
         session_state['training_active'] = False
+        st.info("Training session ended")

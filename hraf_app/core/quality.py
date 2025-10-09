@@ -148,7 +148,7 @@ class QualityScorer:
 
                 self.pc.create_index(
                     name=index_name,
-                    dimension=2048,  # voyage-3-large dimension
+                    dimension=1024,  # ← Change from 2048 to 1024
                     metric='cosine',
                     spec=ServerlessSpec(
                         cloud='aws',
