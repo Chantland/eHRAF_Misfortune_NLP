@@ -140,7 +140,7 @@ def render_data_summary(
             st.dataframe(
                 pd.DataFrame(dist_data),
                 hide_index=True,
-                use_container_width=True
+                width='stretch'  # FIX: changed from width='stretch'
             )
 
 

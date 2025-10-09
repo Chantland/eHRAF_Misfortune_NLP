@@ -209,7 +209,7 @@ class GlobalChatAssistant:
 
         for i, suggestion in enumerate(suggestions[:6]):  # Max 6 suggestions
             with cols[i % 2]:
-                if st.button(suggestion['text'], key=f"suggestion_{i}", use_container_width=True):
+                if st.button(suggestion['text'], key=f"suggestion_{i}", width='stretch'):
                     # Add suggestion as user message
                     st.session_state.global_chat_history.append({
                         "role": "user",

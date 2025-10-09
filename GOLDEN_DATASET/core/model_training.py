@@ -991,7 +991,7 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
     st.markdown("---")
 
     if not session_state.get('training_active', False):
-        if st.button("🚀 Start Training", type="primary", use_container_width=True):
+        if st.button("🚀 Start Training", type="primary", width='stretch'):
             start_training(session_state, training_df, label_columns, passage_col)
     else:
         st.warning("⚠️ Training in progress...")
@@ -1109,7 +1109,7 @@ def render_training_results(session_state: Dict):
         st.dataframe(
             pd.DataFrame(label_results),
             hide_index=True,
-            use_container_width=True
+            width='stretch'
         )
 
     # Model info

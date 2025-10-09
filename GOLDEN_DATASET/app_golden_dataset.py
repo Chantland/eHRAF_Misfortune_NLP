@@ -19,7 +19,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 # Import page modules
-from pages import data_page, models_page, discover_page
+from page_views import data_page, models_page, discover_page
 
 # Import components
 from components.chat_assistant import GlobalChatAssistant
@@ -72,10 +72,10 @@ with st.sidebar:
     # Quick actions
     st.markdown("### ⚡ Quick Actions")
 
-    if st.button("🔄 Refresh", use_container_width=True):
+    if st.button("🔄 Refresh", width='stretch'):
         st.rerun()
 
-    if st.button("🗑️ Clear Cache", use_container_width=True):
+    if st.button("🗑️ Clear Cache", width='stretch'):
         st.cache_data.clear()
         st.success("✅ Cache cleared")
 

@@ -475,123 +475,7 @@ def render_data_preparation_page(session_state: Dict):
         render_quality_tiers_tab(session_state, df, label_columns, scores_df)
 
     with tabs[3]:
-        render_experiments_tab(session_state)  # NEW
-
-    with tabs[4]:
         render_export_tab(session_state, df, label_columns, passage_col)
-
-
-def render_experiments_tab(session_state: Dict):
-    """Render experiment browser and manager"""
-
-    st.markdown("### 🧪 Data Experiments")
-
-    st.markdown("""
-    Browse and manage your data experiments. Each experiment is a versioned dataset with:
-    - Full lineage tracking (source, transformations)
-    - Quality metrics and statistics
-    - Usage documentation
-    - Compatible with all tools
-    """)
-
-    experiment = DataExperiment()
-    experiments = experiment.list_experiments()
-
-    if not experiments:
-        st.info("💡 No experiments yet. Create one by saving data from other tabs.")
-        return
-
-    st.markdown(f"#### 📚 {len(experiments)} Experiments")
-
-    # Filter options
-    col1, col2 = st.columns(2)
-
-    with col1:
-        exp_type_filter = st.multiselect(
-            "Filter by type:",
-            options=['cleaned', 'segment', 'tiered_training', 'custom'],
-            default=[]
-        )
-
-    with col2:
-        sort_by = st.selectbox("Sort by:", ["Newest First", "Oldest First", "Name A-Z"])
-
-    # Sort experiments
-    if sort_by == "Oldest First":
-        experiments = list(reversed(experiments))
-    elif sort_by == "Name A-Z":
-        experiments = sorted(experiments, key=lambda x: x['name'])
-
-    # Filter experiments
-    if exp_type_filter:
-        experiments = [e for e in experiments if e['metadata'].get('experiment_type') in exp_type_filter]
-
-    # Display experiments
-    for exp in experiments:
-        meta = exp['metadata']
-
-        with st.expander(f"📁 {exp['name']}", expanded=False):
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                st.markdown(f"**Type:** {meta.get('experiment_type', 'unknown')}")
-                st.markdown(f"**Created:** {meta.get('created_at', 'unknown')[:10]}")
-
-            with col2:
-                stats = meta.get('statistics', {})
-                st.metric("Passages", stats.get('num_passages', 'N/A'))
-                st.metric("Labels", len(stats.get('label_columns', [])))
-
-            with col3:
-                if meta.get('experiment_type') == 'tiered_training':
-                    tiers = meta.get('tiers', {})
-                    st.metric("Tier 1", tiers.get('tier1', {}).get('count', 'N/A'))
-                    st.metric("Tier 2", tiers.get('tier2', {}).get('count', 'N/A'))
-                elif meta.get('quality_metrics'):
-                    qm = meta['quality_metrics']
-                    st.metric("Quality (cons)", f"{qm['consistency_mean']:.3f}")
-
-            # Provenance
-            st.markdown("**Provenance:**")
-            prov = meta.get('provenance', {})
-            st.caption(f"Source: `{Path(prov.get('source_file', 'unknown')).name}`")
-            if prov.get('transformations_applied'):
-                st.caption(f"Transformations: {', '.join(prov['transformations_applied'])}")
-
-            # Actions
-            st.markdown("---")
-
-            action_col1, action_col2, action_col3 = st.columns(3)
-
-            with action_col1:
-                if st.button("📂 Open Directory", key=f"open_{exp['name']}"):
-                    st.code(str(exp['directory']))
-
-            with action_col2:
-                if st.button("📋 View Metadata", key=f"meta_{exp['name']}"):
-                    st.json(meta)
-
-            with action_col3:
-                if st.button("🎓 Use for Training", key=f"train_{exp['name']}"):
-                    # Set this as the selected dataset for training
-                    if meta.get('experiment_type') == 'tiered_training':
-                        st.info("""
-                        💡 **Tiered Training Dataset**
-
-                        Go to **Train Model** page and select:
-                        - "Tiered Datasets" option
-                        - Navigate to this experiment directory
-                        - Choose your training strategy
-                        """)
-                    else:
-                        st.info(f"""
-                        💡 **Single Dataset**
-
-                        Go to **Train Model** page and:
-                        1. Under Dataset Selection, choose "Full Dataset"
-                        2. Browse to: `{exp['directory']}`
-                        3. Select: `data.xlsx`
-                        """)
 
 def render_analysis_cleaning_tab(session_state: Dict, df: pd.DataFrame, label_columns: List[str], passage_col: str):
     """Render data analysis and cleaning tab"""
@@ -601,8 +485,8 @@ def render_analysis_cleaning_tab(session_state: Dict, df: pd.DataFrame, label_co
     # Initialize analyzer
     analyzer = DataAnalyzer(df, label_columns, passage_col)
 
-    # Run analysis
-    if st.button("🔎 Analyze Data Quality", type="primary"):
+    # Run analysis - ADD KEY
+    if st.button("🔎 Analyze Data Quality", type="primary", key="analyze_quality_btn"):
         with st.spinner("Analyzing..."):
             analysis = analyzer.analyze_quality()
             session_state['quality_analysis'] = analysis
@@ -647,7 +531,7 @@ def render_analysis_cleaning_tab(session_state: Dict, df: pd.DataFrame, label_co
                         'Count': info['count'],
                         'Percentage': f"{info['percentage']:.1f}%"
                     })
-                st.dataframe(pd.DataFrame(dist_data), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(dist_data), hide_index=True, width='stretch')
 
         # Suggestions
         if analysis['suggestions']:
@@ -672,7 +556,7 @@ def render_analysis_cleaning_tab(session_state: Dict, df: pd.DataFrame, label_co
                     selected = st.checkbox(
                         step['name'],
                         value=step['recommended'],
-                        key=f"clean_{step['action']}",
+                        key=f"clean_step_{step['action']}",  # UNIQUE KEY
                         help=step['description']
                     )
                     if selected:
@@ -693,34 +577,16 @@ def render_analysis_cleaning_tab(session_state: Dict, df: pd.DataFrame, label_co
                     st.metric("Remaining", len(df) - total_removed)
 
                 with col2:
-                    if st.button("🧹 Apply Cleaning", type="primary"):
+                    # ADD KEY
+                    if st.button("🧹 Apply Cleaning", type="primary", key="apply_cleaning_btn"):
                         with st.spinner("Cleaning data..."):
                             df_clean = analyzer.apply_cleaning(selected_actions)
                             session_state['cleaned_df'] = df_clean
+                            session_state['df'] = df_clean  # Update working df
                             st.success(f"✅ Cleaned! {len(df)} → {len(df_clean)} passages")
                             st.rerun()
         else:
             st.success("✅ Data is clean! No cleaning steps needed.")
-
-    # Show cleaned data option
-    if 'cleaned_df' in session_state:
-        st.markdown("---")
-        st.success(f"✅ Cleaned dataset available: {len(session_state['cleaned_df'])} passages")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("📊 Use Cleaned Data"):
-                session_state['working_df'] = session_state['cleaned_df']
-                st.info("Using cleaned dataset for all operations")
-                st.rerun()
-
-        with col2:
-            if st.button("🔄 Revert to Original"):
-                if 'cleaned_df' in session_state:
-                    del session_state['cleaned_df']
-                session_state['working_df'] = session_state['df']
-                st.rerun()
-
 
 def render_quality_tiers_tab(session_state: Dict, df: pd.DataFrame, label_columns: List[str],
                              scores_df: Optional[pd.DataFrame]):
@@ -1156,7 +1022,7 @@ def render_quality_tiers_tab(session_state: Dict, df: pd.DataFrame, label_column
                         'Label': label,
                         'Target': target
                     })
-                st.dataframe(pd.DataFrame(summary_data), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(summary_data), hide_index=True, width='stretch')
                 st.caption(f"Total: {len(tier1_targets)} labels selected for targeting")
 
         with tab2:
@@ -1216,7 +1082,7 @@ def render_quality_tiers_tab(session_state: Dict, df: pd.DataFrame, label_column
                         'Label': label,
                         'Target': target
                     })
-                st.dataframe(pd.DataFrame(summary_data), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(summary_data), hide_index=True, width='stretch')
                 st.caption(f"Total: {len(tier2_targets)} labels selected for targeting")
 
         # Build label_targets dict
@@ -1254,7 +1120,7 @@ def render_quality_tiers_tab(session_state: Dict, df: pd.DataFrame, label_column
         st.caption("All remaining passages")
 
     # Create tiers button
-    if st.button("🎯 Create Quality Tiers", type="primary", key="create_tiers_btn"):
+    if st.button("🎯 Create Quality Tiers", type="primary", key="create_quality_tiers_btn"):
         with st.spinner("Creating tiers..."):
             try:
                 # Validate
@@ -1303,7 +1169,7 @@ def render_quality_tiers_tab(session_state: Dict, df: pd.DataFrame, label_column
                                 'Achievement': f"{pct_achieved:.0f}%",
                                 'Status': status
                             })
-                        st.dataframe(pd.DataFrame(target_results), hide_index=True, use_container_width=True)
+                        st.dataframe(pd.DataFrame(target_results), hide_index=True, width='stretch')
 
                     if 'tier2' in label_targets:
                         st.markdown("**Tier 2:**")
@@ -1320,7 +1186,7 @@ def render_quality_tiers_tab(session_state: Dict, df: pd.DataFrame, label_column
                                 'Achievement': f"{pct_achieved:.0f}%",
                                 'Status': status
                             })
-                        st.dataframe(pd.DataFrame(target_results), hide_index=True, use_container_width=True)
+                        st.dataframe(pd.DataFrame(target_results), hide_index=True, width='stretch')
 
                 st.rerun()
 
@@ -1382,7 +1248,7 @@ def render_quality_tiers_tab(session_state: Dict, df: pd.DataFrame, label_column
                     'Total': int(tier1_count + tier2_count + inference_count)
                 })
 
-            st.dataframe(pd.DataFrame(dist_data), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(dist_data), hide_index=True, width='stretch')
 
         # Save options
         st.markdown("---")
@@ -1508,7 +1374,7 @@ def render_export_tab(session_state: Dict, df: pd.DataFrame, label_columns: List
 
         with col2:
             # Save to data directory button
-            if st.button("💾 Save to Data Directory"):
+            if st.button("💾 Save to Data Directory", key="save_to_data_dir_btn"):
                 save_to_data_directory(final_df, export_name, session_state)
 
         with col3:
@@ -1529,9 +1395,8 @@ def render_export_tab(session_state: Dict, df: pd.DataFrame, label_columns: List
 
         tier_name = st.text_input("Package name:", value=f"training_package_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
-        if st.button("💾 Create Training Package"):
+        if st.button("💾 Create Training Package", key="create_training_pkg_btn"):
             create_training_package(session_state, tier_name)
-
 
 class DataExperiment:
     """Manages data experiments with full lineage tracking"""

@@ -542,7 +542,7 @@ def render_model_comparison_ui(
             st.dataframe(
                 comparison_df,
                 hide_index=True,
-                use_container_width=True
+                width='stretch'
             )
 
             # Agreement analysis

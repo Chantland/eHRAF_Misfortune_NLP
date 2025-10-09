@@ -1,5 +1,5 @@
 """
-Page modules for HRAF Dataset Tool
+View modules for HRAF Dataset Tool
 """
 
 from . import data_page

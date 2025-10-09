@@ -447,7 +447,7 @@ def render_inference_section():
                             st.dataframe(
                                 pd.DataFrame(comparison_data),
                                 hide_index=True,
-                                use_container_width=True
+                                width='stretch'
                             )
 
                     except Exception as e:
@@ -521,7 +521,7 @@ def render_hypothesis_testing_section():
                     f'{label_a} = 0': [only_b, neither]
                 })
 
-                st.dataframe(cont_df, hide_index=True, use_container_width=True)
+                st.dataframe(cont_df, hide_index=True, width='stretch')
 
                 # Statistics
                 col1, col2, col3 = st.columns(3)

@@ -281,7 +281,7 @@ def render_evaluation_section(manager: ModelManager):
             st.dataframe(
                 pd.DataFrame(metrics_data),
                 hide_index=True,
-                use_container_width=True
+                width='stretch'
             )
 
             # Overall metrics
@@ -372,7 +372,7 @@ def render_comparison_section(manager: ModelManager):
             st.dataframe(
                 comparison_df,
                 hide_index=True,
-                use_container_width=True
+                width='stretch'
             )
 
             # Agreement analysis
@@ -412,5 +412,5 @@ def render_comparison_section(manager: ModelManager):
             st.dataframe(
                 summary_df,
                 hide_index=True,
-                use_container_width=True
+                width='stretch'
             )
