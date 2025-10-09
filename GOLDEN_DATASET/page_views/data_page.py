@@ -254,6 +254,20 @@ def load_data_object(name: str, stage: PipelineStage):
             # Set as current
             st.session_state['current_data_object'] = data_obj
 
+            # ✅ POPULATE LEGACY SESSION STATE FOR TRAINING
+            st.session_state['initialized'] = True
+            st.session_state['df'] = data_obj.df
+            st.session_state['label_columns'] = data_obj.label_columns
+            st.session_state['passage_col'] = data_obj.passage_col
+            st.session_state['namespace'] = data_obj.namespace
+
+            # Populate cache if available
+            if data_obj.has_embeddings or data_obj.has_scores:
+                st.session_state['cache'] = {
+                    'passage_id_map': data_obj.embeddings_cache if data_obj.has_embeddings else {},
+                    'df_summary': data_obj.scores_cache if data_obj.has_scores else None
+                }
+
             # Initialize finder if needed
             if 'finder' not in st.session_state:
                 initialize_finder()
@@ -1179,7 +1193,6 @@ def render_tiered_actions(obj: DataObject):
     # Show tier sizes
     col1, col2, col3 = st.columns(3)
 
-    tier_meta = obj.metadata.get('tier1_size', 0)
     with col1:
         st.metric("Tier 1 (Elite)", obj.metadata.get('tier1_size', 'N/A'))
 
@@ -1192,14 +1205,11 @@ def render_tiered_actions(obj: DataObject):
     st.markdown("---")
 
     st.markdown("**Next Steps:**")
-    st.markdown("1. Go to **Models** page")
-    st.markdown("2. Select this tiered object for training")
+    st.markdown("1. This data is already loaded and ready")
+    st.markdown("2. Click **🤖 Models** in the sidebar")
     st.markdown("3. Choose training strategy (Tier 1 only, Combined, or Curriculum)")
 
-    # Quick training link
-    if st.button("🎓 Go to Training →", type="primary"):
-        st.info("Navigate to **Models** page in the sidebar")
-
+    st.info("💡 Data is loaded. Use sidebar navigation to go to **🤖 Models** page")
 
 # ============================================================================
 # HELPER FUNCTIONS

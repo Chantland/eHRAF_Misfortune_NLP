@@ -134,6 +134,323 @@ class HierarchicalTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
+def get_training_data_from_session(session_state: Dict) -> Tuple[pd.DataFrame, List[str], str]:
+    """
+    Extract training data from session state
+    Handles both DataObject and legacy flat state
+
+    Returns:
+        Tuple of (df, label_columns, passage_col)
+
+    Raises:
+        ValueError: If no dataset loaded
+    """
+    # Priority 1: Check for current_data_object
+    if 'current_data_object' in session_state and session_state['current_data_object'] is not None:
+        obj = session_state['current_data_object']
+        return obj.df.copy(), obj.label_columns.copy(), obj.passage_col
+
+    # Priority 2: Check for legacy flat state
+    if session_state.get('initialized'):
+        df = session_state.get('df')
+        label_columns = session_state.get('label_columns', [])
+        passage_col = session_state.get('passage_col', 'Passage')
+
+        if df is not None:
+            return df.copy(), label_columns.copy(), passage_col
+
+    # No data loaded
+    raise ValueError("No dataset loaded. Load a dataset from the Data page.")
+
+
+def select_training_dataset(
+        session_state: Dict,
+        default_df: pd.DataFrame,
+        default_labels: List[str],
+        default_passage: str
+) -> Dict:
+    """
+    Handle dataset selection UI
+
+    Returns:
+        Dict with keys: 'df', 'label_columns', 'passage_col'
+    """
+    dataset_source = st.radio(
+        "Data source:",
+        ["Current Dataset", "Browse Experiments", "Browse DataObjects"],
+        horizontal=True,
+        key="training_dataset_source"
+    )
+
+    if dataset_source == "Current Dataset":
+        st.info(f"Using current dataset: {len(default_df):,} passages")
+        return {
+            'df': default_df,
+            'label_columns': default_labels,
+            'passage_col': default_passage
+        }
+
+    elif dataset_source == "Browse Experiments":
+        return _select_from_experiments(session_state, default_df, default_labels, default_passage)
+
+    elif dataset_source == "Browse DataObjects":
+        return _select_from_data_objects(session_state, default_df, default_labels, default_passage)
+
+
+def _select_from_experiments(
+        session_state: Dict,
+        default_df: pd.DataFrame,
+        default_labels: List[str],
+        default_passage: str
+) -> Dict:
+    """Select dataset from saved experiments"""
+
+    experiment = DataExperiment()
+    experiments = experiment.list_experiments()
+
+    if not experiments:
+        st.warning("No experiments found. Using current dataset.")
+        return {
+            'df': default_df,
+            'label_columns': default_labels,
+            'passage_col': default_passage
+        }
+
+    # Select experiment
+    exp_names = [exp['name'] for exp in experiments]
+    selected_exp_name = st.selectbox(
+        "Select experiment:",
+        exp_names,
+        key="exp_selector"
+    )
+
+    selected_exp = next((exp for exp in experiments if exp['name'] == selected_exp_name), None)
+
+    if not selected_exp:
+        st.error("Could not load selected experiment. Using current dataset.")
+        return {
+            'df': default_df,
+            'label_columns': default_labels,
+            'passage_col': default_passage
+        }
+
+    meta = selected_exp['metadata']
+    exp_type = meta.get('experiment_type', 'unknown')
+
+    # Show experiment info
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if 'statistics' in meta:
+            st.metric("Passages", meta['statistics']['num_passages'])
+        elif 'tiers' in meta:
+            total = sum(tier_data.get('count', 0) for tier_data in meta['tiers'].values())
+            st.metric("Passages", total)
+        else:
+            st.metric("Passages", "N/A")
+
+    with col2:
+        if 'statistics' in meta:
+            st.metric("Labels", len(meta['statistics']['label_columns']))
+        elif 'label_columns' in meta:
+            st.metric("Labels", len(meta['label_columns']))
+        else:
+            st.metric("Labels", "N/A")
+
+    with col3:
+        st.metric("Type", exp_type)
+
+    # Load data
+    try:
+        if exp_type == 'tiered_training':
+            tier_choice = st.radio(
+                "Select tier(s):",
+                ["Tier 1 Only", "Tier 1 + Tier 2 Combined"],
+                horizontal=True,
+                key="tier_choice_exp"
+            )
+
+            if "Tier 1 Only" in tier_choice:
+                data_file = selected_exp['directory'] / "tier1.xlsx"
+                training_df = pd.read_excel(data_file)
+                st.info(f"✅ Loaded Tier 1: {len(training_df):,} passages")
+            else:
+                data_file = selected_exp['directory'] / "tier1_tier2_combined.xlsx"
+                training_df = pd.read_excel(data_file)
+                st.info(f"✅ Loaded Combined: {len(training_df):,} passages")
+
+            # Get columns from metadata
+            labels = meta.get('label_columns', default_labels)
+            passage = meta.get('passage_column', default_passage)
+
+        else:
+            # Regular experiment
+            data_file = selected_exp['directory'] / "data.xlsx"
+            training_df = pd.read_excel(data_file)
+            st.info(f"✅ Loaded experiment: {len(training_df):,} passages")
+
+            if 'statistics' in meta:
+                labels = meta['statistics']['label_columns']
+                passage = meta['statistics']['passage_column']
+            else:
+                labels = meta.get('label_columns', default_labels)
+                passage = meta.get('passage_column', default_passage)
+
+        return {
+            'df': training_df,
+            'label_columns': labels,
+            'passage_col': passage
+        }
+
+    except Exception as e:
+        st.error(f"Error loading experiment: {e}")
+        st.info("Using current dataset as fallback")
+        return {
+            'df': default_df,
+            'label_columns': default_labels,
+            'passage_col': default_passage
+        }
+
+
+def _select_from_data_objects(
+        session_state: Dict,
+        default_df: pd.DataFrame,
+        default_labels: List[str],
+        default_passage: str
+) -> Dict:
+    """Select dataset from DataObjects"""
+
+    from core.data_objects import DataObjectManager, PipelineStage
+
+    manager = DataObjectManager()
+    objects = manager.list_objects()
+
+    if not objects:
+        st.warning("No DataObjects found. Using current dataset.")
+        return {
+            'df': default_df,
+            'label_columns': default_labels,
+            'passage_col': default_passage
+        }
+
+    # Filter to useful stages (CLEANED, SCORED, TIERED)
+    useful_objects = [
+        obj for obj in objects
+        if obj['stage'] in ['cleaned', 'scored', 'tiered']
+    ]
+
+    if not useful_objects:
+        st.warning("No suitable DataObjects found. Using current dataset.")
+        return {
+            'df': default_df,
+            'label_columns': default_labels,
+            'passage_col': default_passage
+        }
+
+    # Select object
+    obj_names = [f"{obj['name']} ({obj['stage']})" for obj in useful_objects]
+    selected_name = st.selectbox(
+        "Select DataObject:",
+        obj_names,
+        key="dataobj_selector"
+    )
+
+    selected_idx = obj_names.index(selected_name)
+    selected_obj_meta = useful_objects[selected_idx]
+
+    try:
+        # Load the object
+        data_obj = manager.load(
+            selected_obj_meta['name'],
+            PipelineStage(selected_obj_meta['stage'])
+        )
+
+        if data_obj is None:
+            raise ValueError("Failed to load DataObject")
+
+        st.success(f"✅ Loaded: {len(data_obj.df):,} passages from {data_obj.stage.value} stage")
+
+        # For tiered objects, offer tier selection
+        if data_obj.stage == PipelineStage.TIERED:
+            tier_choice = st.radio(
+                "Select tier(s):",
+                ["Tier 1 Only", "Tier 1 + Tier 2 Combined", "Full Dataset"],
+                horizontal=True,
+                key="tier_choice_obj"
+            )
+
+            obj_dir = Path(selected_obj_meta.get('directory', '.'))
+
+            if "Tier 1 Only" in tier_choice and (obj_dir / "tier1.xlsx").exists():
+                tier_df = pd.read_excel(obj_dir / "tier1.xlsx")
+                st.info(f"Using Tier 1: {len(tier_df):,} passages")
+                return {
+                    'df': tier_df,
+                    'label_columns': data_obj.label_columns,
+                    'passage_col': data_obj.passage_col
+                }
+            elif "Combined" in tier_choice and (obj_dir / "tier1_tier2_combined.xlsx").exists():
+                combined_df = pd.read_excel(obj_dir / "tier1_tier2_combined.xlsx")
+                st.info(f"Using Combined: {len(combined_df):,} passages")
+                return {
+                    'df': combined_df,
+                    'label_columns': data_obj.label_columns,
+                    'passage_col': data_obj.passage_col
+                }
+
+        return {
+            'df': data_obj.df,
+            'label_columns': data_obj.label_columns,
+            'passage_col': data_obj.passage_col
+        }
+
+    except Exception as e:
+        st.error(f"Error loading DataObject: {e}")
+        st.info("Using current dataset as fallback")
+        return {
+            'df': default_df,
+            'label_columns': default_labels,
+            'passage_col': default_passage
+        }
+
+
+def sanitize_config_types(config: Dict) -> Dict:
+    """Ensure config values have correct types"""
+    numeric_fields = {
+        'num_epochs': int,
+        'batch_size': int,
+        'learning_rate': float,
+        'warmup_steps': int,
+        'weight_decay': float,
+        'gradient_accumulation_steps': int,
+        'max_length': int,
+        'label_smoothing': float,
+        'focal_gamma': float,
+        'gate_threshold': float,
+        'teacher_forcing_ratio': float,
+        'dropout': float,
+        'attention_dropout': float,
+        'test_size': float,
+        'validation_size': float,
+        'random_seed': int,
+        'n_splits': int,
+        'hidden_size': int,
+        'hierarchical_hidden_size': int,
+        'num_hidden_layers': int
+    }
+
+    for field, field_type in numeric_fields.items():
+        if field in config and not isinstance(config[field], field_type):
+            try:
+                config[field] = field_type(config[field])
+            except (ValueError, TypeError):
+                # Use default if conversion fails
+                defaults = get_default_training_config()
+                if field in defaults:
+                    config[field] = defaults[field]
+
+    return config
+
+
 def calculate_label_dimensions(label_structure: Dict, predict_main_labels: bool = True) -> Dict:
     """Calculate the number of labels for each category"""
     dims = {
@@ -511,29 +828,40 @@ def visualize_test_results(test_results: Dict, label_names: List[str], output_di
 # STREAMLIT UI COMPONENTS
 # ============================================================================
 
+
 def render_training_page(session_state: Dict):
-    """Render the training page"""
+    """Render the training page - REFACTORED"""
 
     st.markdown("## 🎓 Train Model")
 
-    # Check if data is loaded
-    if not session_state.get('initialized', False):
-        st.warning("⚠️ Load a dataset first")
-        st.info("Go to the Overview page and load a dataset to begin training")
+    # Get training data (DataObject-aware)
+    try:
+        df, label_columns, passage_col = get_training_data_from_session(session_state)
+    except ValueError as e:
+        st.warning(f"⚠️ {str(e)}")
+        st.info("Go to **Data** page and load a dataset to begin training")
         return
 
-    df = session_state.get('df')
-    label_columns = session_state.get('label_columns', [])
-    passage_col = session_state.get('passage_col', 'Passage')
-
-    # Initialize training state
+    # Initialize config
     if 'training_config' not in session_state:
         session_state['training_config'] = get_default_training_config()
 
+    # Sanitize config types (handles AI assistant string inputs)
+    session_state['training_config'] = sanitize_config_types(session_state['training_config'])
+
+    # Initialize training state
     if 'training_active' not in session_state:
         session_state['training_active'] = False
 
-    # Create tabs for configuration and monitoring
+    # Initialize working data (separate from main data)
+    if 'training_working_data' not in session_state:
+        session_state['training_working_data'] = {
+            'df': df,
+            'label_columns': label_columns,
+            'passage_col': passage_col
+        }
+
+    # Tabs
     config_tab, monitor_tab, results_tab = st.tabs(["⚙️ Configuration", "📊 Monitor", "📈 Results"])
 
     with config_tab:
@@ -593,173 +921,31 @@ def get_default_training_config() -> Dict:
 
 
 def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_columns: List[str], passage_col: str):
-    """Render training configuration UI"""
+    """Render training configuration UI - REFACTORED"""
 
     config = session_state['training_config']
 
     st.markdown("### 📋 Training Configuration")
 
-    # Initialize training_df to avoid UnboundLocalError
-    training_df = None
+    # ========================================================================
+    # 1️⃣ Dataset Selection
+    # ========================================================================
 
-    # Dataset selection
     st.markdown("#### 1️⃣ Dataset Selection")
 
-    dataset_source = st.radio(
-        "Data source:",
-        ["Full Dataset", "Browse Experiments", "Tiered Datasets"],
-        horizontal=True
-    )
+    working_data = select_training_dataset(session_state, df, label_columns, passage_col)
+    session_state['training_working_data'] = working_data  # ✅ PERSIST CHANGES
 
-    if dataset_source == "Full Dataset":
-        st.info(f"Using full dataset: {len(df)} passages")
-        training_df = df
-
-    elif dataset_source == "Browse Experiments":
-        # Browse saved experiments
-        experiment = DataExperiment()
-        experiments = experiment.list_experiments()
-
-        if not experiments:
-            st.warning("No experiments found. Create experiments in Data Prep page.")
-            training_df = df  # Fallback to full dataset
-            st.info("💡 Using full dataset as fallback")
-        else:
-            # Filter options
-            exp_names = [exp['name'] for exp in experiments]
-            selected_exp_name = st.selectbox(
-                "Select experiment:",
-                exp_names,
-                key="exp_selector"
-            )
-
-            selected_exp = next((exp for exp in experiments if exp['name'] == selected_exp_name), None)
-
-            if selected_exp:
-                meta = selected_exp['metadata']
-
-                # Show experiment info
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    # Handle both regular and tiered experiment metadata structures
-                    if 'statistics' in meta:
-                        # Regular experiment
-                        st.metric("Passages", meta['statistics']['num_passages'])
-                    elif 'tiers' in meta:
-                        # Tiered experiment - calculate total from tiers
-                        total_passages = sum(
-                            tier_data.get('count', 0)
-                            for tier_data in meta['tiers'].values()
-                        )
-                        st.metric("Passages", total_passages)
-                    else:
-                        st.metric("Passages", "N/A")
-
-                with col2:
-                    # Handle labels
-                    if 'statistics' in meta:
-                        st.metric("Labels", len(meta['statistics']['label_columns']))
-                    elif 'label_columns' in meta:
-                        st.metric("Labels", len(meta['label_columns']))
-                    else:
-                        st.metric("Labels", "N/A")
-
-                with col3:
-                    exp_type = meta.get('experiment_type', 'unknown')
-                    st.metric("Type", exp_type)
-
-                # Load the experiment
-                try:
-                    if exp_type == 'tiered_training':
-                        st.markdown("**Select tier(s) to train on:**")
-                        tier_choice = st.radio(
-                            "Training data:",
-                            ["Tier 1 Only", "Tier 1 + Tier 2 Combined", "Tier 1 then Tier 2 (Curriculum)"],
-                            horizontal=True,
-                            key="tier_choice_exp"
-                        )
-
-                        if "Tier 1 Only" in tier_choice:
-                            data_file = selected_exp['directory'] / "tier1.xlsx"
-                            training_df = pd.read_excel(data_file)
-                            st.info(f"Using Tier 1: {len(training_df)} passages")
-                        elif "Combined" in tier_choice:
-                            data_file = selected_exp['directory'] / "tier1_tier2_combined.xlsx"
-                            training_df = pd.read_excel(data_file)
-                            st.info(f"Using Combined: {len(training_df)} passages")
-                        else:
-                            st.warning("Curriculum learning not yet implemented")
-                            training_df = df  # Fallback
-                            st.info("💡 Using full dataset as fallback")
-
-                        # Update label columns from metadata
-                        if 'label_columns' in meta:
-                            label_columns = meta['label_columns']
-                        if 'passage_column' in meta:
-                            passage_col = meta['passage_column']
-
-                    else:
-                        # Single dataset experiment
-                        data_file = selected_exp['directory'] / "data.xlsx"
-                        training_df = pd.read_excel(data_file)
-                        st.info(f"Using experiment data: {len(training_df)} passages")
-
-                        # Update label columns from metadata
-                        if 'statistics' in meta:
-                            label_columns = meta['statistics']['label_columns']
-                            passage_col = meta['statistics']['passage_column']
-                        elif 'label_columns' in meta:
-                            label_columns = meta['label_columns']
-                            if 'passage_column' in meta:
-                                passage_col = meta['passage_column']
-
-                except Exception as e:
-                    st.error(f"Error loading experiment: {e}")
-                    training_df = df  # Fallback
-                    st.info("💡 Using full dataset as fallback")
-            else:
-                st.error("Could not load selected experiment")
-                training_df = df  # Fallback
-                st.info("💡 Using full dataset as fallback")
-
-    elif dataset_source == "Tiered Datasets":
-        tier1 = session_state.get('tier1_dataset')
-        tier2 = session_state.get('tier2_dataset')
-
-        if tier1 is None or tier2 is None:
-            st.warning("⚠️ No tiered datasets available. Create tiers first on the Data Prep page.")
-            training_df = df  # Fallback
-            st.info("💡 Using full dataset as fallback")
-        else:
-            tier_strategy = st.selectbox(
-                "Training strategy:",
-                [
-                    "Tier 1 Only (High Quality)",
-                    "Tier 1 + Tier 2 (Balanced)",
-                    "Sequential: Tier 1 then Tier 1+2 (Curriculum)"
-                ],
-                key="tier_strategy_select"
-            )
-
-            if "Tier 1 Only" in tier_strategy:
-                training_df = tier1
-                st.info(f"Using Tier 1: {len(tier1)} passages")
-            elif "Tier 1 + Tier 2" in tier_strategy:
-                training_df = pd.concat([tier1, tier2])
-                st.info(f"Using Tier 1+2: {len(training_df)} passages")
-            else:
-                st.warning("Curriculum learning not yet implemented")
-                training_df = df  # Fallback
-                st.info("💡 Using full dataset as fallback")
-
-    # If training_df is still None (shouldn't happen but safety check)
-    if training_df is None:
-        st.warning("⚠️ No training dataset selected. Using full dataset.")
-        training_df = df
+    training_df = working_data['df']
+    training_labels = working_data['label_columns']
+    training_passage = working_data['passage_col']
 
     st.markdown("---")
 
-    # Model Architecture
+    # ========================================================================
+    # 2️⃣ Model Architecture
+    # ========================================================================
+
     st.markdown("#### 2️⃣ Model Architecture")
 
     col1, col2, col3 = st.columns(3)
@@ -767,59 +953,71 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
     with col1:
         config["base_model"] = st.selectbox(
             "Base model:",
-            ["roberta-base", "bert-base-uncased", "distilbert-base-uncased"]
+            ["roberta-base", "bert-base-uncased", "distilbert-base-uncased"],
+            key="train_base_model"
         )
 
         config["use_hierarchy"] = st.checkbox(
             "Use hierarchical structure",
             value=config["use_hierarchy"],
-            help="Sublabel predictions depend on main category predictions"
+            help="Sublabel predictions depend on main category predictions",
+            key="train_use_hier"
         )
 
         if config["use_hierarchy"]:
             config["gated_hierarchy"] = st.checkbox(
                 "Enable gating",
                 value=config["gated_hierarchy"],
-                help="Zero out sublabel predictions if main category not predicted"
+                help="Zero out sublabel predictions if main category not predicted",
+                key="train_gated"
             )
 
             if config["gated_hierarchy"]:
                 config["gate_threshold"] = st.slider(
                     "Gate threshold:",
-                    0.0, 1.0, config["gate_threshold"], 0.05
+                    0.0, 1.0, float(config["gate_threshold"]), 0.05,
+                    key="train_gate_thresh"
                 )
 
     with col2:
         config["predict_main_labels"] = st.checkbox(
             "Predict main labels",
             value=config["predict_main_labels"],
-            help="Predict EVENT, CAUSE, ACTION in addition to sublabels"
+            help="Predict EVENT, CAUSE, ACTION in addition to sublabels",
+            key="train_predict_main"
         )
 
         config["num_hidden_layers"] = st.number_input(
             "Hidden layers:",
-            1, 5, config["num_hidden_layers"]
+            1, 5, int(config["num_hidden_layers"]),
+            key="train_num_layers"
         )
 
         config["hierarchical_hidden_size"] = st.number_input(
             "Hidden size:",
-            128, 1024, config["hierarchical_hidden_size"], step=64
+            128, 1024, int(config["hierarchical_hidden_size"]), step=64,
+            key="train_hidden_size"
         )
 
     with col3:
         config["dropout"] = st.slider(
             "Dropout:",
-            0.0, 0.5, config["dropout"], 0.05
+            0.0, 0.5, float(config["dropout"]), 0.05,
+            key="train_dropout"
         )
 
         config["attention_dropout"] = st.slider(
             "Attention dropout:",
-            0.0, 0.5, config["attention_dropout"], 0.05
+            0.0, 0.5, float(config["attention_dropout"]), 0.05,
+            key="train_attn_dropout"
         )
 
     st.markdown("---")
 
-    # Loss Configuration
+    # ========================================================================
+    # 3️⃣ Loss Configuration
+    # ========================================================================
+
     st.markdown("#### 3️⃣ Loss Configuration")
 
     col1, col2, col3 = st.columns(3)
@@ -828,34 +1026,41 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
         config["use_focal_loss"] = st.checkbox(
             "Use focal loss",
             value=config["use_focal_loss"],
-            help="Helps with class imbalance by focusing on hard examples"
+            help="Helps with class imbalance by focusing on hard examples",
+            key="train_focal"
         )
 
         if config["use_focal_loss"]:
             config["focal_gamma"] = st.slider(
                 "Focal gamma:",
-                0.0, 5.0, config["focal_gamma"], 0.5,
-                help="Higher = more focus on hard examples"
+                0.0, 5.0, float(config["focal_gamma"]), 0.5,
+                help="Higher = more focus on hard examples",
+                key="train_focal_gamma"
             )
 
     with col2:
         config["use_weighted_loss"] = st.checkbox(
             "Use weighted loss",
             value=config["use_weighted_loss"],
-            help="Weight loss by inverse class frequency"
+            help="Weight loss by inverse class frequency",
+            key="train_weighted"
         )
 
     with col3:
         if config["use_hierarchy"]:
             config["teacher_forcing_ratio"] = st.slider(
                 "Teacher forcing:",
-                0.0, 1.0, config["teacher_forcing_ratio"], 0.1,
-                help="Use ground truth main labels during training"
+                0.0, 1.0, float(config["teacher_forcing_ratio"]), 0.1,
+                help="Use ground truth main labels during training",
+                key="train_teacher"
             )
 
     st.markdown("---")
 
-    # Training Parameters
+    # ========================================================================
+    # 4️⃣ Training Parameters
+    # ========================================================================
+
     st.markdown("#### 4️⃣ Training Parameters")
 
     col1, col2, col3, col4 = st.columns(4)
@@ -863,51 +1068,62 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
     with col1:
         config["num_epochs"] = st.number_input(
             "Epochs:",
-            1, 50, config["num_epochs"]
+            1, 50, int(config["num_epochs"]),
+            key="train_epochs"
         )
 
         config["batch_size"] = st.number_input(
             "Batch size:",
-            4, 64, config["batch_size"]
+            4, 64, int(config["batch_size"]),
+            key="train_batch"
         )
 
     with col2:
         config["learning_rate"] = st.number_input(
             "Learning rate:",
-            1e-6, 1e-3, config["learning_rate"],
-            format="%.2e"
+            1e-6, 1e-3, float(config["learning_rate"]),
+            format="%.2e",
+            key="train_lr"
         )
 
         config["warmup_steps"] = st.number_input(
             "Warmup steps:",
-            0, 2000, config["warmup_steps"], step=100
+            0, 2000, int(config["warmup_steps"]), step=100,
+            key="train_warmup"
         )
 
     with col3:
         config["weight_decay"] = st.slider(
             "Weight decay:",
-            0.0, 0.1, config["weight_decay"], 0.01
+            0.0, 0.1, float(config["weight_decay"]), 0.01,
+            key="train_wd"
         )
 
         config["gradient_accumulation_steps"] = st.number_input(
             "Gradient accum:",
-            1, 8, config["gradient_accumulation_steps"]
+            1, 8, int(config["gradient_accumulation_steps"]),
+            key="train_grad_accum"
         )
 
     with col4:
         config["max_length"] = st.number_input(
             "Max length:",
-            128, 1024, config["max_length"], step=64
+            128, 1024, int(config["max_length"]), step=64,
+            key="train_max_len"
         )
 
         config["label_smoothing"] = st.slider(
             "Label smoothing:",
-            0.0, 0.2, config["label_smoothing"], 0.01
+            0.0, 0.2, float(config["label_smoothing"]), 0.01,
+            key="train_smooth"
         )
 
     st.markdown("---")
 
-    # Data Split Configuration
+    # ========================================================================
+    # 5️⃣ Data Split Configuration
+    # ========================================================================
+
     st.markdown("#### 5️⃣ Data Split")
 
     col1, col2 = st.columns(2)
@@ -915,69 +1131,81 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
     with col1:
         config["use_kfold"] = st.checkbox(
             "Use K-fold cross-validation",
-            value=config["use_kfold"]
+            value=config["use_kfold"],
+            key="train_kfold"
         )
 
         if config["use_kfold"]:
             config["n_splits"] = st.number_input(
                 "Number of folds:",
-                2, 10, config["n_splits"]
+                2, 10, int(config["n_splits"]),
+                key="train_folds"
             )
         else:
             config["test_size"] = st.slider(
                 "Test size:",
-                0.1, 0.3, config["test_size"], 0.05
+                0.1, 0.3, float(config["test_size"]), 0.05,
+                key="train_test_size"
             )
 
             config["validation_size"] = st.slider(
                 "Validation size:",
-                0.05, 0.2, config["validation_size"], 0.05
+                0.05, 0.2, float(config["validation_size"]), 0.05,
+                key="train_val_size"
             )
 
     with col2:
         config["random_seed"] = st.number_input(
             "Random seed:",
-            0, 9999, config["random_seed"]
+            0, 9999, int(config["random_seed"]),
+            key="train_seed"
         )
 
-        stratify_options = ["None"] + label_columns
+        stratify_options = ["None"] + training_labels
         stratify_selection = st.selectbox(
             "Stratify by:",
             stratify_options,
-            index=0
+            index=0,
+            key="train_stratify"
         )
         config["stratify_by"] = None if stratify_selection == "None" else stratify_selection
 
     st.markdown("---")
 
-    # Experiment Name
+    # ========================================================================
+    # 6️⃣ Experiment Info
+    # ========================================================================
+
     st.markdown("#### 6️⃣ Experiment Info")
 
     config["experiment_name"] = st.text_input(
         "Experiment name:",
-        value=config["experiment_name"]
+        value=config["experiment_name"],
+        key="train_exp_name"
     )
 
     # Save configuration
     session_state['training_config'] = config
-    session_state['training_df'] = training_df
 
     st.markdown("---")
 
-    # Training summary
+    # ========================================================================
+    # Training Summary
+    # ========================================================================
+
     st.markdown("### 📊 Training Summary")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric("Training Passages", len(training_df))
-        st.metric("Labels", len(label_columns))
+        st.metric("Training Passages", f"{len(training_df):,}")
+        st.metric("Labels", len(training_labels))
 
     with col2:
         # Estimate training time
         batches_per_epoch = len(training_df) // config["batch_size"]
         total_batches = batches_per_epoch * config["num_epochs"]
-        est_seconds = total_batches * 0.5  # Rough estimate
+        est_seconds = total_batches * 0.5
         est_minutes = est_seconds / 60
 
         st.metric("Est. Time", f"{est_minutes:.1f} min")
@@ -987,12 +1215,22 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
         st.metric("Epochs", config["num_epochs"])
         st.metric("Batch Size", config["batch_size"])
 
-    # Start training button
+    # ========================================================================
+    # Start Training Button
+    # ========================================================================
+
     st.markdown("---")
 
     if not session_state.get('training_active', False):
-        if st.button("🚀 Start Training", type="primary", width='stretch'):
-            start_training(session_state, training_df, label_columns, passage_col)
+        if st.button("🚀 Start Training", type="primary", key="start_training_btn"):
+            # Use working data from session state
+            working = session_state['training_working_data']
+            start_training(
+                session_state,
+                working['df'],
+                working['label_columns'],
+                working['passage_col']
+            )
     else:
         st.warning("⚠️ Training in progress...")
         if st.button("🛑 Stop Training", type="secondary"):

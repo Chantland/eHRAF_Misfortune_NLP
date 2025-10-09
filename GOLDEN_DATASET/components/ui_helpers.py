@@ -69,22 +69,11 @@ def render_sidebar_info():
             st.metric("Passages", len(df))
 
         with col2:
-            if cache:
+            if cache and cache.get('df_summary') is not None:  # ADDED: check for None
                 scores_df = cache.get('df_summary')
-                if scores_df is not None:
-                    st.metric("Scored", len(scores_df))
-                else:
-                    st.metric("Scored", "—")
+                st.metric("Scored", len(scores_df))
             else:
                 st.metric("Scored", "—")
-
-        st.caption(f"**Labels:** {len(label_columns)}")
-
-        # File info
-        selected_file = st.session_state.get('selected_file')
-        if selected_file:
-            st.caption(f"**File:** {Path(selected_file).name}")
-
 
 def render_data_summary(
         df: pd.DataFrame,

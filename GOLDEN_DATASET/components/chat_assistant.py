@@ -47,8 +47,9 @@ class GlobalChatAssistant:
             'calculate_scores': self._action_calculate_scores,
             'create_tiers': self._action_create_tiers,
 
-            # Models Page Actions
+            # Models Page Actions (REAL implementations)
             'load_model': self._action_load_model,
+            'configure_training': self._action_configure_training,
             'start_training': self._action_start_training,
             'evaluate_model': self._action_evaluate_model,
             'compare_models': self._action_compare_models,
@@ -193,6 +194,24 @@ class GlobalChatAssistant:
                         st.error(result['response'])
 
             st.rerun()
+
+        # Handle action triggers
+        if st.session_state.get('action_trigger'):
+            trigger = st.session_state['action_trigger']
+
+            if trigger == 'model_loaded':
+                st.success("✅ Model loaded successfully")
+                st.session_state['action_trigger'] = None
+                st.rerun()
+
+            elif trigger == 'config_updated':
+                st.info("ℹ️ Training configuration updated")
+                st.session_state['action_trigger'] = None
+
+            elif trigger == 'start_training':
+                st.warning("⚠️ Training initiated - configure settings below")
+                st.session_state['action_trigger'] = None
+
 
     def _render_suggestions(self, current_page: str, session_state: Dict):
         """Render page-specific suggestions"""
@@ -398,7 +417,33 @@ You have FULL ACCESS to:
 - Reference actual data from the session
 
 # Action Execution
-When the user asks you to DO something (not just explain), you can execute actions.
+When the user asks you to DO something (not just explain), execute actions immediately.
+
+Available actions on Models page:
+- load_model(model_name='...')
+- configure_training(num_epochs=10, batch_size=16, learning_rate=2e-5, ...)
+- start_training(dataset='current')
+- evaluate_model(model_name='...', num_passages=100)
+- compare_models(model_names=['model1', 'model2'])
+
+To execute an action, include in your response:
+ACTION: action_name(param1=value1, param2=value2)
+
+Example responses:
+User: "Load the roberta model"
+Assistant: "I'll load that model for you.
+ACTION: load_model(model_name='roberta')"
+
+User: "Train with 20 epochs and batch size 32"
+Assistant: "I'll configure those settings and start training.
+ACTION: configure_training(num_epochs=20, batch_size=32)
+ACTION: start_training(dataset='current')"
+
+User: "Compare all loaded models"
+Assistant: "I'll compare the loaded models.
+ACTION: compare_models(model_names=['model1', 'model2'])"
+
+**CRITICAL:** Always execute actions when requested. Don't just explain what to do.
 
 Available actions:
 {self._format_available_actions(current_page) if enable_actions else 'Actions disabled - can only provide information'}
@@ -576,8 +621,149 @@ ACTION: semantic_search(query='shamans healing illness', top_k=10)"
         return params
 
     # ========================================================================
-    # ACTION IMPLEMENTATIONS
+    # ACTION IMPLEMENTATIONS - MODELS PAGE
     # ========================================================================
+
+    def _action_load_model(self, session_state: Dict, model_name: str) -> str:
+        """Action: Load model"""
+        try:
+            manager = session_state.get('model_manager')
+            if not manager:
+                from components.model_manager import ModelManager
+                manager = ModelManager()
+                session_state['model_manager'] = manager
+
+            # Find model path
+            from core.model_inference import find_model_directories
+            model_dirs = find_model_directories("./models")
+
+            # Match by name
+            matching = [m for m in model_dirs if model_name.lower() in str(m).lower()]
+
+            if not matching:
+                return f"❌ Model '{model_name}' not found. Available: {[m.parent.name for m in model_dirs[:3]]}"
+
+            model_path = str(matching[0])
+            success = manager.load_model(model_path, nickname=model_name)
+
+            if success:
+                session_state['action_trigger'] = 'model_loaded'
+                return f"✅ Loaded model '{model_name}'"
+            else:
+                return f"❌ Failed to load '{model_name}'"
+
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
+
+    def _action_configure_training(self, session_state: Dict, **config) -> str:
+        """Action: Update training configuration"""
+        try:
+            if 'training_config' not in session_state:
+                from core.model_training import get_default_training_config
+                session_state['training_config'] = get_default_training_config()
+
+            # Update config with provided values
+            updated = []
+            for key, value in config.items():
+                if key in session_state['training_config']:
+                    session_state['training_config'][key] = value
+                    updated.append(f"{key}={value}")
+
+            # ✅ SANITIZE TYPES
+            from core.model_training import sanitize_config_types
+            session_state['training_config'] = sanitize_config_types(session_state['training_config'])
+
+            if updated:
+                session_state['action_trigger'] = 'config_updated'
+                return f"✅ Updated: {', '.join(updated)}"
+            else:
+                return "ℹ️ No valid config parameters provided"
+
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
+
+    def _action_start_training(self, session_state: Dict, dataset: str = 'current') -> str:
+        """Action: Start training"""
+        try:
+            # Import here to avoid circular dependency
+            from core.model_training import get_training_data_from_session, start_training
+
+            # Validate data availability
+            try:
+                df, labels, passage_col = get_training_data_from_session(session_state)
+            except ValueError as e:
+                return f"❌ {str(e)}"
+
+            # Initialize working data if not exists
+            if 'training_working_data' not in session_state:
+                session_state['training_working_data'] = {
+                    'df': df,
+                    'label_columns': labels,
+                    'passage_col': passage_col
+                }
+
+            # Ensure config exists
+            if 'training_config' not in session_state:
+                from core.model_training import get_default_training_config, sanitize_config_types
+                session_state['training_config'] = get_default_training_config()
+                session_state['training_config'] = sanitize_config_types(session_state['training_config'])
+
+            # Start training
+            working = session_state['training_working_data']
+            start_training(
+                session_state,
+                working['df'],
+                working['label_columns'],
+                working['passage_col']
+            )
+
+            return "✅ Training started successfully"
+
+        except Exception as e:
+            import traceback
+            return f"❌ Error: {str(e)}\n{traceback.format_exc()[:200]}"
+
+    def _action_evaluate_model(self, session_state: Dict, model_name: str, num_passages: int = 100) -> str:
+        """Action: Evaluate model"""
+        try:
+            manager = session_state.get('model_manager')
+            if not manager or model_name not in manager.models:
+                return f"❌ Model '{model_name}' not loaded"
+
+            if not session_state.get('initialized'):
+                return "❌ No dataset loaded"
+
+            # Set evaluation trigger
+            session_state['action_trigger'] = 'evaluate'
+            session_state['eval_model'] = model_name
+            session_state['eval_num_passages'] = num_passages
+
+            return f"✅ Evaluation queued for '{model_name}' on {num_passages} passages"
+
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
+
+    def _action_compare_models(self, session_state: Dict, model_names: List[str]) -> str:
+        """Action: Compare models"""
+        try:
+            manager = session_state.get('model_manager')
+            if not manager:
+                return "❌ No models loaded"
+
+            available = list(manager.models.keys())
+            valid_models = [m for m in model_names if m in available]
+
+            if len(valid_models) < 2:
+                return f"❌ Need at least 2 loaded models. Available: {available}"
+
+            # Set comparison trigger
+            session_state['action_trigger'] = 'compare'
+            session_state['compare_models'] = valid_models
+
+            return f"✅ Comparison queued for: {', '.join(valid_models)}"
+
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
 
     def _action_load_dataset(self, session_state: Dict, source: str = 'file') -> str:
         """Action: Load dataset"""
@@ -599,26 +785,6 @@ ACTION: semantic_search(query='shamans healing illness', top_k=10)"
     def _action_create_tiers(self, session_state: Dict, preset: str = 'balanced') -> str:
         """Action: Create training tiers"""
         return f"Tier creation queued (preset={preset})"
-
-    def _action_load_model(self, session_state: Dict, model_name: str) -> str:
-        """Action: Load model"""
-        manager = session_state.get('model_manager')
-        if manager:
-            # Would actually load the model
-            return f"Model '{model_name}' load queued"
-        return "No model manager available"
-
-    def _action_start_training(self, session_state: Dict, **kwargs) -> str:
-        """Action: Start training"""
-        return "Training workflow initiated (go to Models → Train New Model)"
-
-    def _action_evaluate_model(self, session_state: Dict, model_name: str, num_passages: int = 100) -> str:
-        """Action: Evaluate model"""
-        return f"Evaluation queued for '{model_name}' on {num_passages} passages"
-
-    def _action_compare_models(self, session_state: Dict, model_names: List[str]) -> str:
-        """Action: Compare models"""
-        return f"Comparison queued for {len(model_names)} models"
 
     def _action_semantic_search(self, session_state: Dict, query: str, top_k: int = 10, label_filter: str = None) -> str:
         """Action: Semantic search"""

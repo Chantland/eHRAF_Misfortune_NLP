@@ -36,8 +36,8 @@ def render():
     st.markdown("# 🤖 Model Management")
     st.caption("Train, evaluate, and compare classification models")
 
-    # Initialize model manager
-    if 'model_manager' not in st.session_state:
+    # Initialize model manager - FIXED: check for None too
+    if 'model_manager' not in st.session_state or st.session_state.model_manager is None:
         st.session_state.model_manager = ModelManager()
 
     manager = st.session_state.model_manager
@@ -160,9 +160,13 @@ def render_training_section():
         st.info("Go to **Data** page and load a dataset to begin training")
         return
 
+    # ✅ RESPOND TO ASSISTANT ACTIONS
+    if st.session_state.get('action_trigger') == 'start_training':
+        st.info("🤖 **AI Assistant initiated training** - Review configuration below")
+        st.session_state['action_trigger'] = None  # Clear flag
+
     # Use the comprehensive training UI from core
     render_training_page(dict(st.session_state))
-
 
 # ============================================================================
 # EVALUATE

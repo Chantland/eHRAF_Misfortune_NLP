@@ -1,0 +1,80 @@
+{
+  "best_global_step": 184,
+  "best_metric": 0.6857973120232473,
+  "best_model_checkpoint": "models/training_20251009_161629/checkpoint-184",
+  "epoch": 1.0,
+  "eval_steps": 500,
+  "global_step": 184,
+  "is_hyper_param_search": false,
+  "is_local_process_zero": true,
+  "is_world_process_zero": true,
+  "log_history": [
+    {
+      "epoch": 0.2717391304347826,
+      "grad_norm": 0.3022111654281616,
+      "learning_rate": 1.9600000000000003e-06,
+      "loss": 0.135,
+      "step": 50
+    },
+    {
+      "epoch": 0.5434782608695652,
+      "grad_norm": 0.133109912276268,
+      "learning_rate": 3.96e-06,
+      "loss": 0.1221,
+      "step": 100
+    },
+    {
+      "epoch": 0.8152173913043478,
+      "grad_norm": 0.43861132860183716,
+      "learning_rate": 5.9600000000000005e-06,
+      "loss": 0.1126,
+      "step": 150
+    },
+    {
+      "epoch": 1.0,
+      "eval_f1_ACTION": 0.7768924302788844,
+      "eval_f1_Accident": 0.0,
+      "eval_f1_CAUSE": 0.8272727272727273,
+      "eval_f1_Divination": 0.0,
+      "eval_f1_EVENT": 0.9764521193092621,
+      "eval_f1_Illness": 0.8739205526770294,
+      "eval_f1_Material_Physical": 0.0,
+      "eval_f1_Other": 0.0,
+      "eval_f1_Physical_Material": 0.03773584905660377,
+      "eval_f1_Priest_High_Religion": 0.0,
+      "eval_f1_Rule_Violation_Taboo": 0.0,
+      "eval_f1_Shaman_Medium_Healer": 0.0,
+      "eval_f1_Spirits_Gods": 0.0,
+      "eval_f1_Technical_Specialist": 0.0,
+      "eval_f1_Witchcraft_Sorcery": 0.0,
+      "eval_f1_macro": 0.2328182452396338,
+      "eval_f1_micro": 0.6857973120232473,
+      "eval_loss": 0.09499116986989975,
+      "eval_runtime": 12.8299,
+      "eval_samples_per_second": 25.409,
+      "eval_steps_per_second": 1.637,
+      "step": 184
+    }
+  ],
+  "logging_steps": 50,
+  "max_steps": 2760,
+  "num_input_tokens_seen": 0,
+  "num_train_epochs": 15,
+  "save_steps": 500,
+  "stateful_callbacks": {
+    "TrainerControl": {
+      "args": {
+        "should_epoch_stop": false,
+        "should_evaluate": false,
+        "should_log": false,
+        "should_save": true,
+        "should_training_stop": false
+      },
+      "attributes": {}
+    }
+  },
+  "total_flos": 778042541352960.0,
+  "train_batch_size": 16,
+  "trial_name": null,
+  "trial_params": null
+}
