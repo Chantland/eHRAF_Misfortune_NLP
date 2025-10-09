@@ -1,20 +1,20 @@
-# raw_Altogether_Dataset_RACoded_Combined_20251009
+# cleaned-misfortune-data-10092025
 
-**Stage:** RAW  
-**Created:** 2025-10-09T13:32:09.209870  
-**Parent:** None
+**Stage:** EMBEDDED  
+**Created:** 2025-10-09T14:55:29.479891  
+**Parent:** cleaned_cleaned-misfortune-data-10092025_1442
 
 ## Overview
 
 - **Passages:** 11,005
 - **Labels:** 12
-- **Embeddings:** ❌ No
+- **Embeddings:** ✅ Yes
 - **Quality Scores:** ❌ No
 
 ## Configuration
 
 - **Passage Column:** `Passage`
-- **Namespace:** `raw_altogether_dataset_racoded_combined_20251009`
+- **Namespace:** `cleaned-misfortune-data-10092025`
 
 ## Labels
 
@@ -38,6 +38,7 @@
 - `metadata.json` - Complete metadata
 - `README.md` - This file
 
+- Embeddings cached in: `data/cache/cleaned-misfortune-data-10092025_embeddings.json`
 
 
 ## Usage
@@ -53,5 +54,5 @@ Or use programmatically:
 from core.data_objects import DataObjectManager, PipelineStage
 
 manager = DataObjectManager()
-data_obj = manager.load("raw_Altogether_Dataset_RACoded_Combined_20251009", PipelineStage.RAW)
+data_obj = manager.load("cleaned-misfortune-data-10092025", PipelineStage.EMBEDDED)
 ```

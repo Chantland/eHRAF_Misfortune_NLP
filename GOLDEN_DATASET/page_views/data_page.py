@@ -1252,32 +1252,13 @@ def calculate_scores(obj: DataObject, k_similar: int, scored_name: str):
     """Calculate quality scores with checkpointing"""
 
     finder = st.session_state.get('finder')
-
-    if finder is None or st.session_state.get('finder') is None:
+    if finder is None:
         st.error("❌ Finder not initialized")
-
-        # TRY TO INITIALIZE IT HERE
-        st.warning("Attempting to initialize finder now...")
-        try:
-            from dotenv import load_dotenv
-            import os
-            load_dotenv()
-
-            finder = GoldenDatasetFinder(
-                voyage_api_key=os.getenv("VOYAGE_API_KEY"),
-                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                index_name="hraf-misfortune-test",
-                region="us-east-1"
-            )
-            st.session_state['finder'] = finder
-            st.success("✅ Finder initialized! Try clicking Calculate Scores again.")
-        except Exception as e:
-            st.error(f"Failed to initialize: {e}")
         return
 
     with st.spinner("Calculating scores..."):
         try:
-            # Get valid indices - only those in BOTH embeddings and current df
+            # Get valid indices
             valid_df_indices = set(obj.df.index.tolist())
             embedded_indices = [
                 idx for idx in obj.embeddings_cache.keys()
@@ -1285,55 +1266,52 @@ def calculate_scores(obj: DataObject, k_similar: int, scored_name: str):
             ]
 
             if not embedded_indices:
-                st.error("❌ No valid embeddings found for current dataframe")
-                st.info("💡 Generate new embeddings first")
+                st.error("❌ No valid embeddings found")
                 return
 
-            # Calculate scores
             consistency_scores = {}
             progress = st.progress(0)
             status = st.empty()
 
-            for i, idx in enumerate(embedded_indices):
+            for i, df_idx in enumerate(embedded_indices):
                 try:
-                    # Find similar passages
+                    # Pass DataFrame index directly - finder builds Pinecone ID internally
                     similar = finder.find_similar_passages(
-                        query_idx=idx,
+                        query_idx=df_idx,  # ✅ Just the integer index
                         k=k_similar,
                         namespace=obj.namespace
                     )
 
-                    # CRITICAL FIX: Filter similar passages to only those in current df
+                    # Filter similar passages to only those in current df
                     similar_filtered = [
                         s for s in similar
                         if s['passage_idx'] in valid_df_indices
                     ]
 
                     if not similar_filtered:
-                        # No valid similar passages, use 0 consistency
-                        consistency_scores[idx] = 0.0
+                        consistency_scores[df_idx] = 0.0
                         continue
 
-                    # Calculate consistency with filtered similar passages
+                    # Calculate consistency - also pass DataFrame index
                     consistency = finder.calculate_label_consistency(
-                        query_idx=idx,
+                        query_idx=df_idx,  # ✅ Just the integer index
                         similar_passages=similar_filtered,
                         label_columns=obj.label_columns,
                         namespace=obj.namespace
                     )
 
-                    passage_labels = [l for l in obj.label_columns if obj.df.loc[idx, l] == 1]
+                    passage_labels = [l for l in obj.label_columns if obj.df.loc[df_idx, l] == 1]
 
                     if passage_labels:
                         avg = sum(consistency[l] for l in passage_labels) / len(passage_labels)
                     else:
                         avg = 0.0
 
-                    consistency_scores[idx] = avg
+                    consistency_scores[df_idx] = avg
 
                 except Exception as e:
-                    st.warning(f"⚠️ Error processing passage {idx}: {e}")
-                    consistency_scores[idx] = 0.0
+                    st.warning(f"⚠️ Error processing passage {df_idx}: {e}")
+                    consistency_scores[df_idx] = 0.0
 
                 # Update progress
                 pct = (i + 1) / len(embedded_indices)
@@ -1348,7 +1326,7 @@ def calculate_scores(obj: DataObject, k_similar: int, scored_name: str):
                 {
                     'passage_idx': idx,
                     'consistency_avg': consistency_scores[idx],
-                    'rerank_avg': consistency_scores[idx]  # Simplified
+                    'rerank_avg': consistency_scores[idx]
                 }
                 for idx in embedded_indices
             ])

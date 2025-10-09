@@ -1,20 +1,20 @@
-# embedded_cleaned_raw_Altogether_Dataset_RACoded_Combined_20251009_1332_1332
+# cleaned_cleaned-misfortune-data-10092025_1442
 
-**Stage:** EMBEDDED  
-**Created:** 2025-10-09T13:44:55.792143  
-**Parent:** cleaned_raw_Altogether_Dataset_RACoded_Combined_20251009_1332
+**Stage:** CLEANED  
+**Created:** 2025-10-09T14:42:54.469154  
+**Parent:** cleaned-misfortune-data-10092025
 
 ## Overview
 
 - **Passages:** 11,005
 - **Labels:** 12
-- **Embeddings:** ✅ Yes
+- **Embeddings:** ❌ No
 - **Quality Scores:** ❌ No
 
 ## Configuration
 
 - **Passage Column:** `Passage`
-- **Namespace:** `embedded_cleaned_raw_altogether_dataset_racoded_combined_20251009_1332_1332`
+- **Namespace:** `cleaned-misfortune-data-10092025`
 
 ## Labels
 
@@ -38,7 +38,6 @@
 - `metadata.json` - Complete metadata
 - `README.md` - This file
 
-- Embeddings cached in: `data/cache/embedded_cleaned_raw_altogether_dataset_racoded_combined_20251009_1332_1332_embeddings.json`
 
 
 ## Usage
@@ -54,5 +53,5 @@ Or use programmatically:
 from core.data_objects import DataObjectManager, PipelineStage
 
 manager = DataObjectManager()
-data_obj = manager.load("embedded_cleaned_raw_Altogether_Dataset_RACoded_Combined_20251009_1332_1332", PipelineStage.EMBEDDED)
+data_obj = manager.load("cleaned_cleaned-misfortune-data-10092025_1442", PipelineStage.CLEANED)
 ```

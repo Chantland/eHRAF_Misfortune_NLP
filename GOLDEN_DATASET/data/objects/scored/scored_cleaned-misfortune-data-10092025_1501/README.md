@@ -1,20 +1,20 @@
-# cleaned_raw_Altogether_Dataset_RACoded_Combined_20251009_1332
+# scored_cleaned-misfortune-data-10092025_1501
 
-**Stage:** CLEANED  
-**Created:** 2025-10-09T13:32:21.238127  
-**Parent:** raw_Altogether_Dataset_RACoded_Combined_20251009
+**Stage:** SCORED  
+**Created:** 2025-10-09T15:26:28.755366  
+**Parent:** cleaned-misfortune-data-10092025
 
 ## Overview
 
 - **Passages:** 11,005
 - **Labels:** 12
-- **Embeddings:** ❌ No
-- **Quality Scores:** ❌ No
+- **Embeddings:** ✅ Yes
+- **Quality Scores:** ✅ Yes
 
 ## Configuration
 
 - **Passage Column:** `Passage`
-- **Namespace:** `cleaned_raw_altogether_dataset_racoded_combined_20251009_1332`
+- **Namespace:** `cleaned-misfortune-data-10092025`
 
 ## Labels
 
@@ -38,6 +38,8 @@
 - `metadata.json` - Complete metadata
 - `README.md` - This file
 
+- Embeddings cached in: `data/cache/cleaned-misfortune-data-10092025_embeddings.json`
+- Scores cached in: `data/cache/cleaned-misfortune-data-10092025_scores.parquet`
 
 
 ## Usage
@@ -53,5 +55,5 @@ Or use programmatically:
 from core.data_objects import DataObjectManager, PipelineStage
 
 manager = DataObjectManager()
-data_obj = manager.load("cleaned_raw_Altogether_Dataset_RACoded_Combined_20251009_1332", PipelineStage.CLEANED)
+data_obj = manager.load("scored_cleaned-misfortune-data-10092025_1501", PipelineStage.SCORED)
 ```

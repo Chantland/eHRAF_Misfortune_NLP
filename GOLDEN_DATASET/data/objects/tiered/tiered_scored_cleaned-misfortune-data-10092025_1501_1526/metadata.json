@@ -1,0 +1,253 @@
+{
+  "name": "tiered_scored_cleaned-misfortune-data-10092025_1501_1526",
+  "stage": "tiered",
+  "passage_col": "Passage",
+  "label_columns": [
+    "Illness",
+    "Accident",
+    "Other",
+    "Material_Physical",
+    "Spirits_Gods",
+    "Witchcraft_Sorcery",
+    "Rule_Violation_Taboo",
+    "Physical_Material",
+    "Technical_Specialist",
+    "Divination",
+    "Shaman_Medium_Healer",
+    "Priest_High_Religion"
+  ],
+  "metadata_columns": [
+    "Passage Number",
+    "Region",
+    "SubRegion",
+    "Culture",
+    "DocTitle",
+    "Section",
+    "Author",
+    "Page",
+    "Year",
+    "OCM",
+    "OWC",
+    "No_Info",
+    "Description",
+    "Local_Terms",
+    "No_Info.1",
+    "Just_Happens",
+    "Other.1",
+    "Description.1",
+    "Local_Terms.1",
+    "No_Info.2",
+    "Other.2",
+    "Description.2",
+    "Local_terms",
+    "Other_Comments",
+    "Run_Number",
+    "Finished",
+    "Coder",
+    "Other_Comments.1",
+    "Dataset",
+    "Info"
+  ],
+  "parent": "scored_cleaned-misfortune-data-10092025_1501",
+  "created_at": "2025-10-09T15:26:55.959790",
+  "namespace": "cleaned-misfortune-data-10092025",
+  "has_embeddings": true,
+  "has_scores": true,
+  "num_passages": 4071,
+  "metadata": {
+    "tier1_size": 1320,
+    "tier2_size": 2751,
+    "inference_size": 6934,
+    "tier_config": {
+      "created_at": "2025-10-09T15:26:55.957471",
+      "total_passages": 11005,
+      "tiers": {
+        "tier1": {
+          "count": 1320,
+          "percentage": 11.994547932757838,
+          "quality": {
+            "consistency_mean": 0.8037392676767677,
+            "consistency_median": 0.7999999999999999,
+            "rerank_mean": 0.8037392676767677,
+            "rerank_median": 0.7999999999999999,
+            "composite_mean": 0.8037392676767677
+          },
+          "label_distribution": {
+            "Illness": {
+              "count": 1120,
+              "percentage": 84.84848484848484
+            },
+            "Accident": {
+              "count": 57,
+              "percentage": 4.318181818181818
+            },
+            "Other": {
+              "count": 100,
+              "percentage": 7.575757575757576
+            },
+            "Material_Physical": {
+              "count": 92,
+              "percentage": 6.969696969696971
+            },
+            "Spirits_Gods": {
+              "count": 514,
+              "percentage": 38.93939393939394
+            },
+            "Witchcraft_Sorcery": {
+              "count": 81,
+              "percentage": 6.136363636363637
+            },
+            "Rule_Violation_Taboo": {
+              "count": 75,
+              "percentage": 5.681818181818182
+            },
+            "Physical_Material": {
+              "count": 465,
+              "percentage": 35.22727272727273
+            },
+            "Technical_Specialist": {
+              "count": 25,
+              "percentage": 1.893939393939394
+            },
+            "Divination": {
+              "count": 7,
+              "percentage": 0.5303030303030304
+            },
+            "Shaman_Medium_Healer": {
+              "count": 142,
+              "percentage": 10.757575757575758
+            },
+            "Priest_High_Religion": {
+              "count": 0,
+              "percentage": 0.0
+            }
+          }
+        },
+        "tier2": {
+          "count": 2751,
+          "percentage": 24.997728305315768,
+          "quality": {
+            "consistency_mean": 0.5779897786086444,
+            "consistency_median": 0.575,
+            "rerank_mean": 0.5779897786086444,
+            "rerank_median": 0.575,
+            "composite_mean": 0.5779897786086444
+          },
+          "label_distribution": {
+            "Illness": {
+              "count": 2079,
+              "percentage": 75.57251908396947
+            },
+            "Accident": {
+              "count": 189,
+              "percentage": 6.870229007633588
+            },
+            "Other": {
+              "count": 879,
+              "percentage": 31.952017448200653
+            },
+            "Material_Physical": {
+              "count": 701,
+              "percentage": 25.481643038894948
+            },
+            "Spirits_Gods": {
+              "count": 926,
+              "percentage": 33.660487095601596
+            },
+            "Witchcraft_Sorcery": {
+              "count": 326,
+              "percentage": 11.850236277717194
+            },
+            "Rule_Violation_Taboo": {
+              "count": 406,
+              "percentage": 14.75826972010178
+            },
+            "Physical_Material": {
+              "count": 1465,
+              "percentage": 53.25336241366776
+            },
+            "Technical_Specialist": {
+              "count": 297,
+              "percentage": 10.79607415485278
+            },
+            "Divination": {
+              "count": 110,
+              "percentage": 3.9985459832788077
+            },
+            "Shaman_Medium_Healer": {
+              "count": 382,
+              "percentage": 13.885859687386404
+            },
+            "Priest_High_Religion": {
+              "count": 62,
+              "percentage": 2.2537259178480555
+            }
+          }
+        },
+        "inference": {
+          "count": 6934,
+          "percentage": 63.00772376192639,
+          "quality": {
+            "consistency_mean": 0.17531748893192503,
+            "consistency_median": 0.075,
+            "rerank_mean": 0.17531748893192503,
+            "rerank_median": 0.075,
+            "composite_mean": 0.17531748893192503
+          },
+          "label_distribution": {
+            "Illness": {
+              "count": 1469,
+              "percentage": 21.18546293625613
+            },
+            "Accident": {
+              "count": 462,
+              "percentage": 6.662820882607441
+            },
+            "Other": {
+              "count": 1889,
+              "percentage": 27.24257282953562
+            },
+            "Material_Physical": {
+              "count": 1105,
+              "percentage": 15.935967695413902
+            },
+            "Spirits_Gods": {
+              "count": 810,
+              "percentage": 11.681569079896164
+            },
+            "Witchcraft_Sorcery": {
+              "count": 329,
+              "percentage": 4.744736083068936
+            },
+            "Rule_Violation_Taboo": {
+              "count": 635,
+              "percentage": 9.157773291029708
+            },
+            "Physical_Material": {
+              "count": 1644,
+              "percentage": 23.709258725122584
+            },
+            "Technical_Specialist": {
+              "count": 446,
+              "percentage": 6.4320738390539365
+            },
+            "Divination": {
+              "count": 168,
+              "percentage": 2.4228439573117972
+            },
+            "Shaman_Medium_Healer": {
+              "count": 452,
+              "percentage": 6.5186039803865015
+            },
+            "Priest_High_Religion": {
+              "count": 312,
+              "percentage": 4.499567349293337
+            }
+          }
+        }
+      }
+    },
+    "embedding_namespace": "cleaned-misfortune-data-10092025"
+  },
+  "directory": "data/objects/tiered/tiered_scored_cleaned-misfortune-data-10092025_1501_1526"
+}

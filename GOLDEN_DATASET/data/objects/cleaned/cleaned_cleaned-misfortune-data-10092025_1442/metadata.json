@@ -1,5 +1,5 @@
 {
-  "name": "cleaned_raw_Altogether_Dataset_RACoded_Combined_20251009_1332",
+  "name": "cleaned_cleaned-misfortune-data-10092025_1442",
   "stage": "cleaned",
   "passage_col": "Passage",
   "label_columns": [
@@ -48,9 +48,9 @@
     "Dataset",
     "Info"
   ],
-  "parent": "raw_Altogether_Dataset_RACoded_Combined_20251009",
-  "created_at": "2025-10-09T13:32:21.238127",
-  "namespace": "cleaned_raw_altogether_dataset_racoded_combined_20251009_1332",
+  "parent": "cleaned-misfortune-data-10092025",
+  "created_at": "2025-10-09T14:42:54.469154",
+  "namespace": "cleaned-misfortune-data-10092025",
   "has_embeddings": false,
   "has_scores": false,
   "num_passages": 11005,
@@ -60,5 +60,5 @@
     ],
     "removed_passages": 0
   },
-  "directory": "data/objects/cleaned/cleaned_raw_Altogether_Dataset_RACoded_Combined_20251009_1332"
+  "directory": "data/objects/cleaned/cleaned_cleaned-misfortune-data-10092025_1442"
 }

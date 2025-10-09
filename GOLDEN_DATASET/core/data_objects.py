@@ -402,6 +402,7 @@ class DataPipeline:
             label_columns=parent_obj.label_columns,
             metadata_columns=parent_obj.metadata_columns,
             parent=parent_obj.name,
+            namespace=parent_obj.namespace,  # ✅ PRESERVE namespace
             metadata={
                 'cleaning_steps': cleaning_steps,
                 'removed_passages': len(parent_obj.df) - len(df_cleaned)
@@ -426,9 +427,11 @@ class DataPipeline:
             label_columns=parent_obj.label_columns,
             metadata_columns=parent_obj.metadata_columns,
             parent=parent_obj.name,
+            namespace=parent_obj.namespace,  # ✅ PRESERVE namespace
             embeddings_cache=embeddings_cache,
             metadata={
-                'num_embedded': len(embeddings_cache)
+                'num_embedded': len(embeddings_cache),
+                'embedding_namespace': parent_obj.namespace  # Track where embeddings live
             }
         )
 
@@ -450,12 +453,14 @@ class DataPipeline:
             label_columns=parent_obj.label_columns,
             metadata_columns=parent_obj.metadata_columns,
             parent=parent_obj.name,
+            namespace=parent_obj.namespace,  # ✅ PRESERVE namespace
             embeddings_cache=parent_obj.embeddings_cache,
             scores_cache=scores_df,
             metadata={
                 'num_scored': len(scores_df),
                 'mean_consistency': float(scores_df['consistency_avg'].mean()),
-                'mean_rerank': float(scores_df['rerank_avg'].mean())
+                'mean_rerank': float(scores_df['rerank_avg'].mean()),
+                'embedding_namespace': parent_obj.namespace
             }
         )
 
@@ -472,8 +477,6 @@ class DataPipeline:
             tier_config: Dict
     ) -> DataObject:
         """Create tiered data object"""
-        # For tiered, we save all three splits in metadata
-        # but the main df is the combined training set
         combined_df = pd.concat([tier1_df, tier2_df])
 
         data_obj = DataObject(
@@ -484,17 +487,18 @@ class DataPipeline:
             label_columns=parent_obj.label_columns,
             metadata_columns=parent_obj.metadata_columns,
             parent=parent_obj.name,
+            namespace=parent_obj.namespace,  # ✅ PRESERVE namespace
             embeddings_cache=parent_obj.embeddings_cache,
             scores_cache=parent_obj.scores_cache,
             metadata={
                 'tier1_size': len(tier1_df),
                 'tier2_size': len(tier2_df),
                 'inference_size': len(inference_df),
-                'tier_config': tier_config
+                'tier_config': tier_config,
+                'embedding_namespace': parent_obj.namespace
             }
         )
 
-        # Save individual tier files in the object directory
         obj_dir = self.manager.save(data_obj)
         tier1_df.to_excel(obj_dir / "tier1.xlsx", index=False)
         tier2_df.to_excel(obj_dir / "tier2.xlsx", index=False)

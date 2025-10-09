@@ -1,6 +1,6 @@
 {
-  "name": "embedded_cleaned_raw_Altogether_Dataset_RACoded_Combined_20251009_1332_1332",
-  "stage": "embedded",
+  "name": "scored_cleaned-misfortune-data-10092025_1501",
+  "stage": "scored",
   "passage_col": "Passage",
   "label_columns": [
     "Illness",
@@ -48,14 +48,17 @@
     "Dataset",
     "Info"
   ],
-  "parent": "cleaned_raw_Altogether_Dataset_RACoded_Combined_20251009_1332",
-  "created_at": "2025-10-09T13:44:55.792143",
-  "namespace": "embedded_cleaned_raw_altogether_dataset_racoded_combined_20251009_1332_1332",
+  "parent": "cleaned-misfortune-data-10092025",
+  "created_at": "2025-10-09T15:26:28.755366",
+  "namespace": "cleaned-misfortune-data-10092025",
   "has_embeddings": true,
-  "has_scores": false,
+  "has_scores": true,
   "num_passages": 11005,
   "metadata": {
-    "num_embedded": 11005
+    "num_scored": 11005,
+    "mean_consistency": 0.351352765337545,
+    "mean_rerank": 0.351352765337545,
+    "embedding_namespace": "cleaned-misfortune-data-10092025"
   },
-  "directory": "data/objects/embedded/embedded_cleaned_raw_Altogether_Dataset_RACoded_Combined_20251009_1332_1332"
+  "directory": "data/objects/scored/scored_cleaned-misfortune-data-10092025_1501"
 }
