@@ -27,14 +27,14 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score
 
 # Import model architecture from model_inference
-from GOLDEN_DATASET.core.model_inference import (
+from core.model_inference import (
     ConfigurableHierarchicalConfig,
     ConfigurableHierarchicalModel,
     HRAFModelLoader
 )
 
 # Import DataExperiment from data_preparation
-from GOLDEN_DATASET.core.data_preparation import DataExperiment
+from core.data_preparation import DataExperiment
 
 
 class TrainingSession:

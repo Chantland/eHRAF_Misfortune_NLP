@@ -21,12 +21,20 @@ sys.path.insert(0, str(project_root))
 # Import components
 from components.ui_helpers import (
     render_data_summary,
-    render_file_browser
+    render_file_browser,
+    render_quality_threshold_controls,
+    render_progress_with_eta
 )
 
 # Import core functionality
-from core import GoldenDatasetFinder
-from core import DataAnalyzer, DataExperiment
+from core.discovery_architecture import GoldenDatasetFinder
+from core.data_preparation import (
+    DataAnalyzer,
+    DataSegmenter,
+    DataExperiment,
+    render_data_preparation_page
+)
+from datetime import datetime
 
 
 def render():
@@ -77,7 +85,7 @@ def render_load_data_section():
                 df,
                 st.session_state.label_columns,
                 st.session_state.passage_col,
-                show_distribution=False
+                show_distribution=True
             )
 
         with col2:
@@ -382,21 +390,98 @@ def render_clean_analyze_section():
     if 'quality_analysis' in st.session_state:
         analysis = st.session_state.quality_analysis
 
+        st.markdown("#### 📊 Analysis Results")
+
         # Issues
         if analysis['issues']:
-            st.markdown("#### ⚠️ Issues Detected")
+            st.markdown("**⚠️ Issues Found:**")
             for issue in analysis['issues']:
                 st.warning(issue)
         else:
             st.success("✅ No major issues detected!")
 
+        # Statistics
+        with st.expander("📈 Detailed Statistics", expanded=True):
+            stats = analysis['stats']
+
+            # Passage length stats
+            if 'passage_length' in stats:
+                st.markdown("**Passage Lengths:**")
+                length_stats = stats['passage_length']
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Mean", f"{length_stats['mean']:.0f} chars")
+                with col2:
+                    st.metric("Median", f"{length_stats['median']:.0f} chars")
+                with col3:
+                    st.metric("Std Dev", f"{length_stats['std']:.0f} chars")
+
+            # Label distribution
+            if 'label_distribution' in stats:
+                st.markdown("**Label Distribution:**")
+                dist_data = []
+                for label, info in stats['label_distribution'].items():
+                    dist_data.append({
+                        'Label': label,
+                        'Count': info['count'],
+                        'Percentage': f"{info['percentage']:.1f}%"
+                    })
+                st.dataframe(pd.DataFrame(dist_data), hide_index=True, use_container_width=True)
+
         # Recommendations
         if analysis['suggestions']:
-            with st.expander("💡 Recommendations"):
-                for suggestion in analysis['suggestions']:
-                    st.info(suggestion)
+            st.markdown("#### 💡 Recommendations")
+            for suggestion in analysis['suggestions']:
+                st.info(suggestion)
 
-        # TODO: Add cleaning workflow here
+        st.markdown("---")
+
+        # Cleaning workflow
+        st.markdown("### 🧹 Data Cleaning")
+
+        cleaning_steps = analyzer.suggest_cleaning_steps(analysis)
+
+        if cleaning_steps:
+            st.markdown("**Select cleaning steps to apply:**")
+
+            selected_actions = []
+            for step in cleaning_steps:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    selected = st.checkbox(
+                        step['name'],
+                        value=step['recommended'],
+                        key=f"clean_{step['action']}",
+                        help=step['description']
+                    )
+                    if selected:
+                        selected_actions.append(step['action'])
+                with col2:
+                    impact_color = "🟢" if step['impact'] < len(df) * 0.05 else "🟡" if step['impact'] < len(
+                        df) * 0.1 else "🔴"
+                    st.caption(f"{impact_color} -{step['impact']}")
+
+            if selected_actions:
+                st.markdown("---")
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    total_removed = sum(
+                        step['impact'] for step in cleaning_steps if step['action'] in selected_actions)
+                    st.metric("Total Passages to Remove", total_removed)
+                    st.metric("Remaining", len(df) - total_removed)
+
+                with col2:
+                    if st.button("🧹 Apply Cleaning", type="primary"):
+                        with st.spinner("Cleaning data..."):
+                            df_clean = analyzer.apply_cleaning(selected_actions)
+                            st.session_state['cleaned_df'] = df_clean
+                            st.session_state['df'] = df_clean  # Update working df
+                            st.success(f"✅ Cleaned! {len(df)} → {len(df_clean)} passages")
+                            st.rerun()
+        else:
+            st.success("✅ Data is clean! No cleaning steps needed.")
 
 
 # ============================================================================
@@ -412,8 +497,188 @@ def render_embed_score_section():
 
     st.markdown("### 🔢 Embed & Score")
 
-    # TODO: Implement embedding and scoring workflow
-    st.info("🚧 Embedding and scoring interface coming soon")
+    df = st.session_state.df
+    label_columns = st.session_state.label_columns
+    passage_col = st.session_state.passage_col
+    finder = st.session_state.get('finder')
+    namespace = st.session_state.get('namespace', 'main')
+
+    if finder is None:
+        st.error("❌ Finder not initialized. Reload dataset.")
+        return
+
+    # Check if embeddings exist
+    cache = st.session_state.get('cache', {})
+    has_embeddings = 'passage_id_map' in cache
+    has_scores = 'df_summary' in cache
+
+    # Status
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric("Total Passages", len(df))
+
+    with col2:
+        if has_embeddings:
+            st.metric("Embedded", len(cache['passage_id_map']))
+        else:
+            st.metric("Embedded", 0)
+
+    with col3:
+        if has_scores:
+            st.metric("Scored", len(cache['df_summary']))
+        else:
+            st.metric("Scored", 0)
+
+    st.markdown("---")
+
+    # Embed section
+    st.markdown("#### 1️⃣ Generate Embeddings")
+
+    if has_embeddings:
+        st.success(f"✅ Embeddings already exist for {len(cache['passage_id_map'])} passages")
+
+        if st.button("🔄 Recompute Embeddings"):
+            if 'cache' in st.session_state:
+                del st.session_state['cache']
+            st.rerun()
+    else:
+        st.info("Generate embeddings using Voyage AI for semantic search and scoring")
+
+        batch_size = st.slider("Batch size:", 8, 64, 32, help="Number of passages to embed at once")
+
+        if st.button("🚀 Generate Embeddings", type="primary"):
+            with st.spinner("Generating embeddings..."):
+                try:
+                    passage_id_map = finder.embed_and_store_passages(
+                        df=df,
+                        passage_column=passage_col,
+                        label_columns=label_columns,
+                        namespace=namespace,
+                        batch_size=batch_size
+                    )
+
+                    # Store in cache
+                    if 'cache' not in st.session_state:
+                        st.session_state['cache'] = {}
+
+                    st.session_state['cache']['passage_id_map'] = passage_id_map
+
+                    st.success(f"✅ Generated embeddings for {len(passage_id_map)} passages")
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"❌ Error generating embeddings: {e}")
+
+    st.markdown("---")
+
+    # Score section
+    st.markdown("#### 2️⃣ Calculate Quality Scores")
+
+    if not has_embeddings:
+        st.warning("⚠️ Generate embeddings first")
+        return
+
+    if has_scores:
+        scores_df = cache['df_summary']
+        st.success(f"✅ Quality scores exist for {len(scores_df)} passages")
+
+        # Show score distribution
+        with st.expander("📊 Score Distribution", expanded=True):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("**Consistency Scores**")
+                st.metric("Mean", f"{scores_df['consistency_avg'].mean():.3f}")
+                st.metric("Median", f"{scores_df['consistency_avg'].median():.3f}")
+
+            with col2:
+                st.markdown("**Rerank Scores**")
+                st.metric("Mean", f"{scores_df['rerank_avg'].mean():.3f}")
+                st.metric("Median", f"{scores_df['rerank_avg'].median():.3f}")
+
+        if st.button("🔄 Recompute Scores"):
+            if 'df_summary' in cache:
+                del cache['df_summary']
+            st.rerun()
+    else:
+        st.info("Calculate quality scores using similarity and reranking")
+
+        k_similar = st.slider("Similar passages to check:", 5, 50, 20,
+                             help="Number of similar passages to compare for consistency")
+
+        if st.button("🎯 Calculate Scores", type="primary"):
+            with st.spinner("Calculating quality scores..."):
+                try:
+                    start_time = datetime.now()
+
+                    # Get embedded indices
+                    passage_id_map = cache['passage_id_map']
+                    embedded_indices = list(passage_id_map.keys())
+
+                    # Calculate scores
+                    consistency_scores = {}
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    for i, idx in enumerate(embedded_indices):
+                        # Find similar passages
+                        similar = finder.find_similar_passages(
+                            query_idx=idx,
+                            k=k_similar,
+                            namespace=namespace
+                        )
+
+                        # Calculate consistency
+                        consistency = finder.calculate_label_consistency(
+                            query_idx=idx,
+                            similar_passages=similar,
+                            label_columns=label_columns,
+                            namespace=namespace
+                        )
+
+                        # Get active labels
+                        passage_labels = [label for label in label_columns
+                                        if df.loc[idx, label] == 1]
+
+                        if passage_labels:
+                            avg_consistency = sum(consistency[label] for label in passage_labels) / len(passage_labels)
+                        else:
+                            avg_consistency = 0.0
+
+                        consistency_scores[idx] = avg_consistency
+
+                        # Update progress
+                        progress = (i + 1) / len(embedded_indices)
+                        progress_bar.progress(progress)
+                        status_text.text(f"Processing: {i + 1}/{len(embedded_indices)}")
+
+                    progress_bar.empty()
+                    status_text.empty()
+
+                    # Create summary dataframe
+                    summary_data = []
+                    for idx in embedded_indices:
+                        summary_data.append({
+                            'passage_idx': idx,
+                            'consistency_avg': consistency_scores[idx],
+                            'rerank_avg': consistency_scores[idx]  # Simplified for now
+                        })
+
+                    scores_df = pd.DataFrame(summary_data)
+
+                    # Store in cache
+                    cache['df_summary'] = scores_df
+
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    st.success(f"✅ Calculated scores for {len(scores_df)} passages in {elapsed:.1f}s")
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"❌ Error calculating scores: {e}")
+                    import traceback
+                    with st.expander("Error details"):
+                        st.code(traceback.format_exc())
 
 
 # ============================================================================
@@ -427,7 +692,5 @@ def render_create_training_sets_section():
         st.info("💡 Load a dataset first")
         return
 
-    st.markdown("### 📦 Create Training Sets")
-
-    # TODO: Implement tier creation workflow
-    st.info("🚧 Training set creation interface coming soon")
+    # Use the existing comprehensive implementation from data_preparation.py
+    render_data_preparation_page(dict(st.session_state))

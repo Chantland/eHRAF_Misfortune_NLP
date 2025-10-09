@@ -14,7 +14,7 @@ from datetime import datetime
 import sys
 
 sys.path.append(str(Path(__file__).parent.parent))
-from model_inference import HRAFModelLoader, find_model_directories
+from core.model_inference import HRAFModelLoader, find_model_directories
 
 
 class ModelManager:
