@@ -1,6 +1,6 @@
 """
 Model Training Module for HRAF Golden Dataset Discovery
-Comprehensive training system with interactive hierarchy configuration
+Comprehensive training system with FIXED weighted focal loss implementation
 """
 
 import streamlit as st
@@ -104,7 +104,7 @@ class TrainingSession:
 
 
 class HierarchicalTrainer(Trainer):
-    """Custom trainer with teacher forcing and weighted loss"""
+    """Custom trainer with FIXED weighted focal loss"""
 
     def __init__(self, class_weights=None, teacher_forcing_ratio=0.5, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -115,7 +115,11 @@ class HierarchicalTrainer(Trainer):
             self.class_weights = class_weights.to(self.args.device)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
-        """Custom loss computation with optional weighted loss"""
+        """
+        ✅ FIXED: Custom loss computation with proper weighted focal loss
+
+        Combines class weighting and focal loss correctly
+        """
         labels = inputs.pop("labels")
 
         # Teacher forcing during training
@@ -123,19 +127,62 @@ class HierarchicalTrainer(Trainer):
 
         outputs = model(
             **inputs,
-            labels=labels,
+            labels=None,  # Don't let model compute loss - we'll do it
             teacher_forcing=use_teacher_forcing
         )
 
-        # Custom weighted loss if class weights provided
+        logits = outputs.logits
+
+        # ✅ IMPLEMENT WEIGHTED FOCAL LOSS (combines both)
         if self.class_weights is not None and model.config.use_weighted_loss:
-            logits = outputs.logits
-            weighted_bce = nn.BCEWithLogitsLoss(weight=self.class_weights)
-            loss = weighted_bce(logits, labels.float())
+            if model.config.use_focal_loss:
+                # ✅ Weighted Focal Loss - PROPER IMPLEMENTATION
+                gamma = model.config.focal_gamma
+
+                # Compute BCE loss (no reduction yet)
+                bce_loss = nn.functional.binary_cross_entropy_with_logits(
+                    logits, labels.float(), reduction='none'
+                )
+
+                # Compute focal weighting
+                probs = torch.sigmoid(logits)
+                focal_weight = torch.where(
+                    labels == 1,
+                    (1 - probs) ** gamma,  # Focus on hard positives
+                    probs ** gamma         # Focus on hard negatives
+                )
+
+                # Apply BOTH focal weighting AND class weighting
+                class_weights_expanded = self.class_weights.unsqueeze(0).expand_as(logits)
+                weighted_focal_loss = focal_weight * bce_loss * class_weights_expanded
+
+                # Reduce to scalar
+                loss = weighted_focal_loss.mean()
+            else:
+                # ✅ Weighted BCE only (no focal)
+                bce_loss = nn.functional.binary_cross_entropy_with_logits(
+                    logits, labels.float(), reduction='none'
+                )
+                class_weights_expanded = self.class_weights.unsqueeze(0).expand_as(logits)
+                weighted_loss = bce_loss * class_weights_expanded
+                loss = weighted_loss.mean()
         else:
-            loss = outputs.loss
+            # Standard loss (focal only or plain BCE)
+            if model.config.use_focal_loss:
+                loss = self._focal_loss(logits, labels.float(), gamma=model.config.focal_gamma)
+            else:
+                loss_fct = nn.BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels.float())
 
         return (loss, outputs) if return_outputs else loss
+
+    def _focal_loss(self, logits, targets, gamma=2.0):
+        """Focal loss without class weighting"""
+        bce_loss = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        probas = torch.sigmoid(logits)
+        focal_weight = torch.where(targets == 1, (1 - probas) ** gamma, probas ** gamma)
+        focal_loss = focal_weight * bce_loss
+        return focal_loss.mean()
 
 
 # ============================================================================
@@ -169,11 +216,7 @@ def render_hierarchy_configuration(
         session_state: Dict,
         config_key: str = 'hierarchy_config'
 ) -> Dict:
-    """
-    Interactive hierarchy builder UI
-
-    Now directly manages session state to ensure changes persist
-    """
+    """Interactive hierarchy builder UI"""
 
     st.markdown("#### 🏗️ Hierarchy Configuration")
     st.caption("Define main categories and map sublabels to them")
@@ -223,11 +266,10 @@ def render_hierarchy_configuration(
             )
 
         with col2:
-            st.write("")  # Spacing
-            st.write("")  # Spacing
+            st.write("")
+            st.write("")
             if st.button("Add", type="primary", disabled=not new_category, use_container_width=True):
                 if new_category and new_category not in hierarchy['categories']:
-                    # Modify the hierarchy in session state
                     session_state[config_key]['categories'][new_category] = {
                         'sublabels': [],
                         'enabled': True
@@ -350,13 +392,7 @@ def render_hierarchy_configuration(
 
 
 def auto_detect_hierarchy(label_columns: List[str]) -> Dict:
-    """
-    Auto-detect hierarchy from column naming patterns
-
-    Looks for patterns like:
-    - EVENT_Illness, CAUSE_Spirits_Gods, ACTION_Physical_Material
-    - Illness (EVENT), Spirits_Gods (CAUSE), Physical_Material (ACTION)
-    """
+    """Auto-detect hierarchy from column naming patterns"""
     hierarchy = {'categories': {}}
 
     # Pattern 1: PREFIX_Sublabel
@@ -386,16 +422,7 @@ def build_label_structure_from_hierarchy(
     hierarchy_config: Dict,
     predict_main_labels: bool
 ) -> Tuple[Dict, List[str]]:
-    """
-    Build label structure and ordered label list from hierarchy config
-
-    Args:
-        hierarchy_config: User-configured hierarchy
-        predict_main_labels: Whether to include main category labels
-
-    Returns:
-        Tuple of (label_structure, ordered_label_columns)
-    """
+    """Build label structure and ordered label list from hierarchy config"""
 
     label_structure = {}
     ordered_labels = []
@@ -463,7 +490,6 @@ def calculate_label_dimensions(
             elif category == "ACTION" or "action" in category.lower():
                 dims["num_action_labels"] += 1
             else:
-                # Default to action if ambiguous
                 dims["num_action_labels"] += 1
 
             dims["label_indices"][sublabel] = current_idx
@@ -480,17 +506,7 @@ def augment_data_with_main_categories(
     label_structure: Dict,
     predict_main_labels: bool
 ) -> pd.DataFrame:
-    """
-    Add main category columns to dataframe (inferred from sublabels)
-
-    Args:
-        df: DataFrame with sublabel columns
-        label_structure: Hierarchy structure
-        predict_main_labels: Whether to add main categories
-
-    Returns:
-        DataFrame with main category columns added
-    """
+    """Add main category columns to dataframe (inferred from sublabels)"""
 
     if not predict_main_labels:
         return df
@@ -503,12 +519,9 @@ def augment_data_with_main_categories(
             continue
 
         sublabels = category_info['sublabels']
-
-        # Find which sublabels exist in df
         existing_sublabels = [col for col in sublabels if col in df.columns]
 
         if existing_sublabels:
-            # Main category = 1 if ANY sublabel = 1
             df[category_name] = (df[existing_sublabels].sum(axis=1) > 0).astype(int)
         else:
             df[category_name] = 0
@@ -637,7 +650,9 @@ def prepare_datasets(
 
 
 def calculate_class_weights(df: pd.DataFrame, label_columns: List[str]) -> torch.Tensor:
-    """Calculate class weights for handling imbalance"""
+    """
+    ✅ FIXED: Calculate class weights with capping for stability
+    """
     class_weights = []
 
     for col in label_columns:
@@ -646,6 +661,7 @@ def calculate_class_weights(df: pd.DataFrame, label_columns: List[str]) -> torch
 
         if pos_count > 0:
             weight = neg_count / pos_count
+            weight = min(weight, 50.0)  # ✅ Cap at 50x to prevent instability
         else:
             weight = 1.0
 
@@ -879,6 +895,84 @@ def get_default_training_config() -> Dict:
     }
 
 
+def sanitize_config_types(config: Dict) -> Dict:
+    """
+    ✅ NEW: Ensure all config values have correct types
+    """
+    type_map = {
+        'use_focal_loss': bool,
+        'use_weighted_loss': bool,
+        'use_hierarchy': bool,
+        'gated_hierarchy': bool,
+        'predict_main_labels': bool,
+        'focal_gamma': float,
+        'learning_rate': float,
+        'weight_decay': float,
+        'dropout': float,
+        'attention_dropout': float,
+        'teacher_forcing_ratio': float,
+        'gate_threshold': float,
+        'label_smoothing': float,
+        'test_size': float,
+        'validation_size': float,
+        'num_epochs': int,
+        'batch_size': int,
+        'warmup_steps': int,
+        'max_length': int,
+        'gradient_accumulation_steps': int,
+        'random_seed': int,
+        'hidden_size': int,
+        'hierarchical_hidden_size': int,
+        'num_hidden_layers': int,
+    }
+
+    sanitized = {}
+    for key, value in config.items():
+        if key in type_map:
+            target_type = type_map[key]
+            try:
+                if target_type == bool:
+                    if isinstance(value, str):
+                        sanitized[key] = value.lower() in ('true', '1', 'yes')
+                    else:
+                        sanitized[key] = bool(value)
+                else:
+                    sanitized[key] = target_type(value)
+            except (ValueError, TypeError):
+                sanitized[key] = value  # Keep original if conversion fails
+        else:
+            sanitized[key] = value
+
+    return sanitized
+
+
+# ============================================================================
+# UTILITY FUNCTION FOR CHAT ASSISTANT
+# ============================================================================
+
+def get_training_data_from_session(session_state: Dict) -> Tuple[pd.DataFrame, List[str], str]:
+    """
+    ✅ NEW: Extract training data from session state
+    Used by chat assistant to validate data availability
+    """
+    if not session_state.get('initialized', False):
+        raise ValueError("No dataset loaded. Load data first.")
+
+    df = session_state.get('df')
+    if df is None or len(df) == 0:
+        raise ValueError("Dataset is empty")
+
+    label_columns = session_state.get('label_columns', [])
+    if not label_columns:
+        raise ValueError("No label columns found")
+
+    passage_col = session_state.get('passage_col', 'Passage')
+    if passage_col not in df.columns:
+        raise ValueError(f"Passage column '{passage_col}' not found")
+
+    return df, label_columns, passage_col
+
+
 # ============================================================================
 # STREAMLIT UI - MAIN TRAINING PAGE
 # ============================================================================
@@ -1024,11 +1118,11 @@ def render_training_configuration(
             help="Add synthetic main category labels (inferred from sublabels) for the model to predict"
         )
 
-        # Hierarchy builder - now manages its own session state
+        # Hierarchy builder
         hierarchy_config = render_hierarchy_configuration(
             label_columns,
             session_state,
-            config_key='training_hierarchy_config'  # Unique key for training hierarchy
+            config_key='training_hierarchy_config'
         )
 
         # Save back to config
@@ -1057,7 +1151,7 @@ def render_training_configuration(
     st.markdown("---")
 
     # ========================================================================
-    # SECTION 3: LOSS CONFIGURATION
+    # SECTION 3: LOSS CONFIGURATION - ✅ FIXED UI
     # ========================================================================
 
     st.markdown("#### 3️⃣ Loss Configuration")
@@ -1067,31 +1161,57 @@ def render_training_configuration(
     with col1:
         config["use_focal_loss"] = st.checkbox(
             "Use focal loss",
-            value=config["use_focal_loss"],
+            value=config.get("use_focal_loss", True),
+            key="config_focal_loss",
             help="Helps with class imbalance by focusing on hard examples"
         )
 
         if config["use_focal_loss"]:
             config["focal_gamma"] = st.slider(
                 "Focal gamma:",
-                0.0, 5.0, config["focal_gamma"], 0.5,
+                0.0, 5.0,
+                config.get("focal_gamma", 2.5),
+                0.5,
+                key="config_focal_gamma",
                 help="Higher = more focus on hard examples"
             )
+        else:
+            config["focal_gamma"] = 2.0
 
     with col2:
         config["use_weighted_loss"] = st.checkbox(
             "Use weighted loss",
-            value=config["use_weighted_loss"],
-            help="Weight loss by inverse class frequency"
+            value=config.get("use_weighted_loss", False),
+            key="config_weighted_loss",
+            help="Weight loss by inverse class frequency - CRITICAL for rare labels"
         )
 
+        # Show impact preview
+        if config["use_weighted_loss"]:
+            st.success("✅ Will balance rare labels")
+        else:
+            st.error("⚠️ Rare labels may be ignored!")
+
     with col3:
-        if config["use_hierarchy"]:
+        if config.get("use_hierarchy", False):
             config["teacher_forcing_ratio"] = st.slider(
                 "Teacher forcing:",
-                0.0, 1.0, config["teacher_forcing_ratio"], 0.1,
+                0.0, 1.0,
+                config.get("teacher_forcing_ratio", 0.7),
+                0.1,
+                key="config_teacher_forcing",
                 help="Probability of using ground truth main labels during training"
             )
+        else:
+            st.caption("Hierarchy disabled")
+
+    # ✅ Show current loss configuration summary
+    st.info(f"""
+**Current Loss Setup:**
+- Focal Loss: {'✅ Enabled' if config['use_focal_loss'] else '❌ Disabled'} {f"(gamma={config.get('focal_gamma', 2.0)})" if config['use_focal_loss'] else ''}
+- Weighted Loss: {'✅ Enabled' if config['use_weighted_loss'] else '❌ Disabled'}
+- Combined: {'✅ Weighted Focal Loss' if config['use_focal_loss'] and config['use_weighted_loss'] else 'Standard Loss'}
+""")
 
     st.markdown("---")
 
@@ -1196,7 +1316,8 @@ def render_training_configuration(
         value=config["experiment_name"]
     )
 
-    # Save to session
+    # ✅ Sanitize types before saving
+    config = sanitize_config_types(config)
     session_state['training_config'] = config
     session_state['training_df'] = training_df
 
@@ -1600,10 +1721,9 @@ def start_training(
     else:
         st.info("📋 Using flat label structure...")
 
-        # Flat structure - just use original labels
+        # Flat structure
         final_label_list = label_columns
 
-        # Create simple structure for model
         label_structure = {
             'FLAT': {
                 'main_label': 'FLAT',
@@ -1614,7 +1734,7 @@ def start_training(
 
         st.success(f"✅ Flat structure: {len(final_label_list)} labels")
 
-    # Save final label list for results display
+    # Save final label list
     session_state['final_label_list'] = final_label_list
 
     # Calculate label dimensions
@@ -1652,7 +1772,24 @@ def start_training(
     if config["use_weighted_loss"]:
         with st.spinner("Calculating class weights..."):
             class_weights = calculate_class_weights(training_df, final_label_list)
-            st.info(f"📊 Using weighted loss for {len(final_label_list)} labels")
+
+            # ✅ DEBUG: Show weights
+            st.markdown("**📊 Class Weights Debug:**")
+            weights_df = pd.DataFrame({
+                'Label': final_label_list,
+                'Weight': [f"{w:.2f}" for w in class_weights.tolist()]
+            })
+
+            # Display in expander
+            with st.expander("View Class Weights", expanded=False):
+                st.dataframe(weights_df, hide_index=True, use_container_width=True)
+
+            # Check for extreme weights
+            max_weight = class_weights.max().item()
+            if max_weight > 100:
+                st.warning(f"⚠️ Very high weight detected: {max_weight:.1f}x - capped at 50x")
+
+            st.info(f"📊 Using weighted loss for {len(final_label_list)} labels (max weight: {min(max_weight, 50.0):.1f}x)")
 
     # Training arguments
     training_args = TrainingArguments(
