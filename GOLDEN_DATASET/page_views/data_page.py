@@ -1,287 +1,196 @@
 """
-Data Page - Load, Clean, Embed, Score, and Prepare Training Data
+Data Page - REFACTORED with New Architecture + Interactive Preview
 
-Architecture:
-- Self-contained page module
-- Uses components from components/
-- Uses core functionality from core/
-- Clean separation of concerns
+Complete implementation including:
+- New DataObject pipeline workflow
+- Original interactive data preview system
+- Full integration with cache and object management
 """
 
 import streamlit as st
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List
+from datetime import datetime
+from typing import Optional, Dict, List, Tuple
 import sys
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-# Import components
-from components.ui_helpers import (
-    render_data_summary,
-    render_file_browser,
-    render_quality_threshold_controls,
-    render_progress_with_eta
+# Import new architecture
+from core.data_cache import CacheManager
+from core.data_objects import (
+    DataObject, DataObjectManager, DataPipeline, PipelineStage
 )
-
-# Import core functionality
+from core.data_preparation import DataAnalyzer, DataSegmenter
 from core.discovery_architecture import GoldenDatasetFinder
-from core.data_preparation import (
-    DataAnalyzer,
-    DataSegmenter,
-    DataExperiment,
-    render_data_preparation_page
-)
-from datetime import datetime
 
-def make_df_display_safe(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert dataframe to display-safe format for Streamlit
-    Fixes PyArrow serialization issues with mixed-type object columns
-    """
-    df_safe = df.copy()
-    for col in df_safe.columns:
-        if df_safe[col].dtype == 'object':
-            df_safe[col] = df_safe[col].astype(str)
-    return df_safe
+
+# ============================================================================
+# MAIN RENDER FUNCTION
+# ============================================================================
 
 def render():
-    """Main render function for Data page"""
+    """Main render function - NEW ARCHITECTURE"""
 
-    st.markdown("# 📊 Data Management")
-    st.caption("Load, clean, embed, score, and prepare training datasets")
+    st.markdown("# 📊 Data Pipeline")
+    st.caption("RAW → CLEANED → EMBEDDED → SCORED → TIERED")
 
-    # Create tabs for different sections
-    tabs = st.tabs([
-        "📂 Load Data",
-        "🧹 Clean & Analyze",
-        "🔢 Embed & Score",
-        "📦 Create Training Sets"
-    ])
+    # Initialize managers
+    if 'pipeline' not in st.session_state:
+        st.session_state.pipeline = DataPipeline()
 
-    with tabs[0]:
-        render_load_data_section()
+    if 'cache_manager' not in st.session_state:
+        st.session_state.cache_manager = CacheManager()
 
-    with tabs[1]:
-        render_clean_analyze_section()
+    # Current working object
+    current_obj = st.session_state.get('current_data_object')
 
-    with tabs[2]:
-        render_embed_score_section()
+    # Show status bar
+    render_status_bar(current_obj)
 
-    with tabs[3]:
-        render_create_training_sets_section()
+    st.markdown("---")
+
+    # Main workflow
+    if current_obj is None:
+        render_start_workflow()
+    else:
+        render_pipeline_workflow(current_obj)
 
 
 # ============================================================================
-# SECTION 1: LOAD DATA
+# STATUS BAR
 # ============================================================================
 
-def render_load_data_section():
-    """Load and validate datasets"""
+def render_status_bar(current_obj: Optional[DataObject]):
+    """Show current data object status"""
 
-    st.markdown("### 📂 Load Dataset")
-
-    # Show current status
-    if st.session_state.get('initialized'):
-        df = st.session_state.df
-        st.success(f"✅ Dataset loaded: {len(df)} passages")
-
-        col1, col2 = st.columns([3, 1])
-
-        with col1:
-            render_data_summary(
-                df,
-                st.session_state.label_columns,
-                st.session_state.passage_col,
-                show_distribution=True
-            )
-
-        with col2:
-            if st.button("🔄 Load Different Dataset"):
-                # Reset and reload
-                st.session_state.initialized = False
-                st.rerun()
-
+    if current_obj is None:
+        st.info("💡 No data loaded. Start by loading or creating a new dataset.")
         return
 
-    # File selection
-    st.markdown("#### Select Data Source")
+    # Status card
+    col1, col2, col3, col4, col5 = st.columns(5)
 
-    source_type = st.radio(
-        "Source:",
-        ["📁 Browse Files", "⬆️ Upload File"],
-        horizontal=True,
-        key="data_source_type"
-    )
+    with col1:
+        st.metric("Current Object", current_obj.name)
+        stage_emoji = {
+            PipelineStage.RAW: "📦",
+            PipelineStage.CLEANED: "🧹",
+            PipelineStage.EMBEDDED: "🔢",
+            PipelineStage.SCORED: "📊",
+            PipelineStage.TIERED: "🎯"
+        }
+        st.caption(f"{stage_emoji.get(current_obj.stage, '📦')} Stage: **{current_obj.stage.value.upper()}**")
 
-    if source_type == "📁 Browse Files":
-        render_file_browser_loader()
+    with col2:
+        st.metric("Passages", f"{len(current_obj.df):,}")
+        st.caption(f"**{len(current_obj.label_columns)}** labels")
 
-    elif source_type == "⬆️ Upload File":
-        render_file_upload_loader()
+    with col3:
+        if current_obj.has_embeddings:
+            st.metric("Embeddings", "✅")
+            st.caption(f"{len(current_obj.embeddings_cache):,} embedded")
+        else:
+            st.metric("Embeddings", "❌")
+            st.caption("Not embedded")
 
+    with col4:
+        if current_obj.has_scores:
+            st.metric("Scores", "✅")
+            st.caption(f"{len(current_obj.scores_cache):,} scored")
+        else:
+            st.metric("Scores", "❌")
+            st.caption("Not scored")
 
-def render_file_browser_loader():
-    """Browse and load from file system with interactive preview"""
-
-    data_dir = Path("./data")
-
-    selected_file = render_file_browser(
-        data_dir,
-        file_types=['.xlsx', '.csv'],
-        key_suffix="data_load"
-    )
-
-    if selected_file:
-        st.markdown("---")
-
-        # Show interactive preview
-        config = render_interactive_data_preview(selected_file)
-
-        if config:
-            # Load with confirmed settings
-            load_dataset_with_config(config)
-
-
-def load_dataset_with_config(config: Dict):
-    """Load dataset with user-confirmed configuration"""
-
-    filepath = config['filepath']
-    header_row = config['header_row']
-    passage_col = config['passage_col']
-    all_columns = config['all_columns']
-    label_columns = config['label_columns']
-    metadata_columns = config['metadata_columns']
-
-    with st.spinner("Loading dataset with your configuration..."):
-        try:
-            # Load full dataset with selected header
-            df = pd.read_excel(filepath, header=header_row)
-
-            # Validate all columns exist
-            if passage_col not in df.columns:
-                st.error(f"❌ Passage column '{passage_col}' not found!")
-                return
-
-            missing_cols = [col for col in all_columns if col not in df.columns]
-            if missing_cols:
-                st.error(f"❌ Selected columns not found: {missing_cols}")
-                return
-
-            # Keep only selected columns
-            keep_cols = [passage_col] + all_columns
-            df = df[keep_cols].copy()
-
-            # Validate label columns are numeric
-            for label in label_columns:
-                if df[label].dtype not in ['int64', 'float64', 'Int64']:
-                    st.warning(f"⚠️ Label column '{label}' is not numeric. Converting to numeric...")
-                    df[label] = pd.to_numeric(df[label], errors='coerce').fillna(0).astype(int)
-
-            # Show final statistics
-            st.info(f"""
-            **Dataset Loaded:**
-            - Total passages: {len(df)}
-            - Valid passages: {df[passage_col].notna().sum()}
-            - Label columns: {len(label_columns)}
-            - Metadata columns: {len(metadata_columns)}
-            """)
-
-            # Initialize discovery architecture
-            from dotenv import load_dotenv
-            import os
-            load_dotenv()
-
-            finder = GoldenDatasetFinder(
-                voyage_api_key=os.getenv("VOYAGE_API_KEY"),
-                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                index_name="hraf-misfortune-test",
-                region="us-east-1"
-            )
-
-            # Generate namespace from filename
-            namespace = filepath.stem.lower().replace(' ', '_')
-
-            # Store in session state
-            st.session_state.df = df
-            st.session_state.label_columns = label_columns
-            st.session_state.passage_col = passage_col
-            st.session_state.metadata_columns = metadata_columns
-            st.session_state.all_columns = all_columns
-            st.session_state.finder = finder
-            st.session_state.namespace = namespace
-            st.session_state.selected_file = str(filepath)
-            st.session_state.initialized = True
-
-            # Store configuration for future reference
-            st.session_state.load_config = config
-
-            # Clear preview state
-            for key in ['preview_df', 'preview_file', 'preview_header_row', 'selected_columns',
-                        'selected_label_columns']:
-                if key in st.session_state:
-                    del st.session_state[key]
-
-            st.success(f"✅ Successfully loaded dataset!")
-            st.balloons()
+    with col5:
+        if st.button("🔄 Switch Object"):
+            st.session_state['show_object_browser'] = True
             st.rerun()
 
-        except Exception as e:
-            st.error(f"❌ Error loading dataset: {e}")
-            import traceback
-            with st.expander("Error details"):
-                st.code(traceback.format_exc())
 
-def render_experiment_browser_loader():
-    """Browse and load from saved experiments"""
+# ============================================================================
+# START WORKFLOW
+# ============================================================================
 
-    experiment = DataExperiment()
-    experiments = experiment.list_experiments()
+def render_start_workflow():
+    """Initial workflow - load or create data"""
 
-    if not experiments:
-        st.info("💡 No experiments found. Create experiments after loading data.")
+    st.markdown("### 🚀 Start New Pipeline")
+
+    tab1, tab2 = st.tabs(["📂 Load Existing", "➕ Create New"])
+
+    with tab1:
+        render_object_browser()
+
+    with tab2:
+        render_new_data_loader()
+
+
+def render_object_browser():
+    """Browse and load existing data objects"""
+
+    st.markdown("#### 📚 Saved Data Objects")
+
+    manager = st.session_state.pipeline.manager
+
+    # Group by stage
+    all_objects = manager.list_objects()
+
+    if not all_objects:
+        st.info("💡 No saved objects found. Create a new one in the 'Create New' tab.")
         return
 
-    # Show experiments
-    exp_names = [exp['name'] for exp in experiments]
-
-    selected_exp_name = st.selectbox(
-        "Select experiment:",
-        exp_names,
-        key="exp_load_selector"
+    # Filter by stage
+    stage_filter = st.selectbox(
+        "Filter by stage:",
+        ["All"] + [s.value for s in PipelineStage],
+        key="obj_browser_filter"
     )
 
-    selected_exp = next((e for e in experiments if e['name'] == selected_exp_name), None)
+    if stage_filter != "All":
+        all_objects = [obj for obj in all_objects if obj['stage'] == stage_filter]
 
-    if selected_exp:
-        meta = selected_exp['metadata']
+    st.caption(f"Showing {len(all_objects)} objects")
 
-        # Show metadata
-        col1, col2, col3 = st.columns(3)
+    # Display objects
+    for obj_meta in all_objects:
+        with st.expander(f"📦 {obj_meta['name']} ({obj_meta['stage'].upper()})", expanded=False):
+            col1, col2, col3 = st.columns(3)
 
-        with col1:
-            st.metric("Type", meta.get('experiment_type', 'unknown'))
+            with col1:
+                st.metric("Passages", f"{obj_meta.get('num_passages', 0):,}")
+                st.caption(f"Labels: {obj_meta.get('num_labels', 0)}")
 
-        with col2:
-            stats = meta.get('statistics', {})
-            st.metric("Passages", stats.get('num_passages', 'N/A'))
+            with col2:
+                emb_status = "✅" if obj_meta.get('has_embeddings') else "❌"
+                st.metric("Embeddings", emb_status)
+                score_status = "✅" if obj_meta.get('has_scores') else "❌"
+                st.caption(f"Scores: {score_status}")
 
-        with col3:
-            st.metric("Labels", len(stats.get('label_columns', [])))
+            with col3:
+                st.caption(f"Created: {obj_meta.get('created_at', 'Unknown')[:10]}")
+                if obj_meta.get('parent'):
+                    st.caption(f"Parent: {obj_meta['parent']}")
 
-        if st.button("📂 Load Experiment", type="primary"):
-            load_dataset_from_experiment(selected_exp)
+            # Load button
+            if st.button(f"📂 Load '{obj_meta['name']}'", key=f"load_{obj_meta['name']}_{obj_meta['stage']}"):
+                load_data_object(obj_meta['name'], PipelineStage(obj_meta['stage']))
 
 
-def render_file_upload_loader():
-    """Upload and load file with interactive preview"""
+def render_new_data_loader():
+    """Create new data object from file"""
 
+    st.markdown("#### ➕ Create New Data Object")
+
+    st.info("💡 Load a new dataset and configure it as a RAW data object")
+
+    # File upload
     uploaded_file = st.file_uploader(
         "Choose Excel file:",
         type=['xlsx', 'xls'],
-        key="data_upload"
+        key="new_data_upload"
     )
 
     if uploaded_file:
@@ -292,17 +201,62 @@ def render_file_upload_loader():
         with open(temp_path, 'wb') as f:
             f.write(uploaded_file.getbuffer())
 
-        st.markdown("---")
-
         # Show interactive preview
         config = render_interactive_data_preview(temp_path)
 
         if config:
-            # Load with confirmed settings
-            load_dataset_with_config(config)
+            create_raw_data_object(config, temp_path)
 
-            # Clean up temp file
-            temp_path.unlink()
+
+def load_data_object(name: str, stage: PipelineStage):
+    """Load existing data object"""
+
+    with st.spinner(f"Loading {name}..."):
+        try:
+            manager = st.session_state.pipeline.manager
+            data_obj = manager.load(name, stage)
+
+            if data_obj is None:
+                st.error(f"❌ Could not load {name}")
+                return
+
+            # Set as current
+            st.session_state['current_data_object'] = data_obj
+
+            # Initialize finder if needed
+            if 'finder' not in st.session_state:
+                from dotenv import load_dotenv
+                import os
+                load_dotenv()
+
+                finder = GoldenDatasetFinder(
+                    voyage_api_key=os.getenv("VOYAGE_API_KEY"),
+                    pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                    index_name="hraf-misfortune-test",
+                    region="us-east-1"
+                )
+
+                st.session_state['finder'] = finder
+
+            st.success(f"✅ Loaded: {name}")
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"❌ Error loading: {e}")
+
+
+# ============================================================================
+# INTERACTIVE DATA PREVIEW (from original data_page.py)
+# ============================================================================
+
+def make_df_display_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert dataframe to display-safe format for Streamlit"""
+    df_safe = df.copy()
+    for col in df_safe.columns:
+        if df_safe[col].dtype == 'object':
+            df_safe[col] = df_safe[col].astype(str)
+    return df_safe
+
 
 def render_interactive_data_preview(filepath: Path):
     """
@@ -391,10 +345,7 @@ def render_interactive_data_preview(filepath: Path):
     df_preview = pd.read_excel(filepath, header=header_row, nrows=5)
 
     # Create display-safe version
-    df_preview_display = df_preview.copy()
-    for col in df_preview_display.columns:
-        if df_preview_display[col].dtype == 'object':
-            df_preview_display[col] = df_preview_display[col].astype(str)
+    df_preview_display = make_df_display_safe(df_preview)
 
     all_columns = list(df_preview.columns)
 
@@ -749,7 +700,7 @@ def render_interactive_data_preview(filepath: Path):
                    ("..." if len(non_binary) > 3 else ""))
 
     # Load button
-    if st.button("✅ Load Dataset", type="primary", width='stretch'):
+    if st.button("✅ Confirm Configuration", type="primary", width='stretch'):
         return {
             'filepath': filepath,
             'header_row': header_row,
@@ -761,163 +712,136 @@ def render_interactive_data_preview(filepath: Path):
 
     return None
 
-def load_dataset_from_file(filepath: Path, header_row: int, passage_col: str):
-    """Load dataset from file"""
 
-    with st.spinner("Loading dataset..."):
-        try:
-            # Load Excel
-            df = pd.read_excel(filepath, header=header_row)
+def create_raw_data_object(config: dict, filepath: Path):
+    """Create RAW data object from configuration"""
 
-            # Validate passage column
-            if passage_col not in df.columns:
-                st.error(f"Column '{passage_col}' not found!")
-                st.info(f"Available columns: {', '.join(df.columns)}")
-                return
+    st.markdown("---")
+    st.markdown("#### 💾 Save as Data Object")
 
-            # Auto-detect labels
-            label_columns = detect_label_columns(df, passage_col)
+    # Name the object
+    default_name = f"raw_{filepath.stem}_{datetime.now().strftime('%Y%m%d')}"
 
-            if not label_columns:
-                st.error("No binary label columns detected!")
-                return
+    object_name = st.text_input(
+        "Data object name:",
+        value=default_name,
+        key="new_obj_name"
+    )
 
-            # Initialize discovery architecture
-            from dotenv import load_dotenv
-            import os
-            load_dotenv()
+    if st.button("✅ Create RAW Data Object", type="primary"):
+        with st.spinner("Creating data object..."):
+            try:
+                # Load data with config
+                df = pd.read_excel(filepath, header=config['header_row'])
 
-            finder = GoldenDatasetFinder(
-                voyage_api_key=os.getenv("VOYAGE_API_KEY"),
-                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                index_name="hraf-misfortune-test",
-                region="us-east-1"
-            )
+                # Filter columns
+                keep_cols = [config['passage_col']] + config['all_columns']
+                df = df[keep_cols].copy()
 
-            # Generate namespace
-            namespace = filepath.stem.lower().replace(' ', '_')
+                # Validate labels
+                for label in config['label_columns']:
+                    if df[label].dtype not in ['int64', 'float64', 'Int64']:
+                        df[label] = pd.to_numeric(df[label], errors='coerce').fillna(0).astype(int)
 
-            # Store in session state
-            st.session_state.df = df
-            st.session_state.label_columns = label_columns
-            st.session_state.passage_col = passage_col
-            st.session_state.finder = finder
-            st.session_state.namespace = namespace
-            st.session_state.selected_file = str(filepath)
-            st.session_state.initialized = True
+                # Create RAW data object
+                pipeline = st.session_state.pipeline
 
-            st.success(f"✅ Loaded: {len(df)} passages, {len(label_columns)} labels")
-            st.rerun()
+                data_obj = pipeline.create_raw(
+                    name=object_name,
+                    df=df,
+                    passage_col=config['passage_col'],
+                    label_columns=config['label_columns'],
+                    metadata_columns=config['metadata_columns'],
+                    source_file=str(filepath),
+                    header_row=config['header_row']
+                )
 
-        except Exception as e:
-            st.error(f"Error loading dataset: {e}")
+                st.success(f"✅ Created RAW data object: '{object_name}'")
 
+                # Load as current
+                st.session_state['current_data_object'] = data_obj
 
-def load_dataset_from_experiment(experiment: Dict):
-    """Load dataset from saved experiment"""
+                # Initialize finder
+                from dotenv import load_dotenv
+                import os
+                load_dotenv()
 
-    with st.spinner("Loading experiment..."):
-        try:
-            exp_dir = experiment['directory']
-            meta = experiment['metadata']
+                finder = GoldenDatasetFinder(
+                    voyage_api_key=os.getenv("VOYAGE_API_KEY"),
+                    pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                    index_name="hraf-misfortune-test",
+                    region="us-east-1"
+                )
 
-            # Load data file
-            data_file = exp_dir / "data.xlsx"
+                st.session_state['finder'] = finder
 
-            if not data_file.exists():
-                st.error("Experiment data file not found!")
-                return
+                # Clear preview state
+                for key in ['preview_df', 'preview_file', 'preview_header_row', 'selected_columns',
+                            'selected_label_columns', 'column_selections', 'label_selections']:
+                    if key in st.session_state:
+                        del st.session_state[key]
 
-            df = pd.read_excel(data_file)
+                st.balloons()
+                st.rerun()
 
-            # Get metadata
-            label_columns = meta['statistics']['label_columns']
-            passage_col = meta['statistics']['passage_column']
-
-            # Initialize finder
-            from dotenv import load_dotenv
-            import os
-            load_dotenv()
-
-            finder = GoldenDatasetFinder(
-                voyage_api_key=os.getenv("VOYAGE_API_KEY"),
-                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                index_name="hraf-misfortune-test",
-                region="us-east-1"
-            )
-
-            namespace = meta.get('provenance', {}).get('source_namespace', 'experiment')
-
-            # Store in session state
-            st.session_state.df = df
-            st.session_state.label_columns = label_columns
-            st.session_state.passage_col = passage_col
-            st.session_state.finder = finder
-            st.session_state.namespace = namespace
-            st.session_state.selected_file = str(data_file)
-            st.session_state.initialized = True
-
-            st.success(f"✅ Loaded experiment: {len(df)} passages")
-            st.rerun()
-
-        except Exception as e:
-            st.error(f"Error loading experiment: {e}")
-
-
-def detect_label_columns(df: pd.DataFrame, passage_col: str) -> List[str]:
-    """Auto-detect binary label columns"""
-
-    label_columns = []
-
-    exclude_cols = {passage_col, 'ID', 'Culture', 'Region', 'Description'}
-
-    for col in df.columns:
-        if col in exclude_cols:
-            continue
-
-        if df[col].dtype in ['int64', 'float64']:
-            unique_vals = df[col].dropna().unique()
-
-            if len(unique_vals) <= 2 and set(unique_vals).issubset({0, 1, 0.0, 1.0}):
-                if (df[col] == 1).sum() > 0:
-                    label_columns.append(col)
-
-    return label_columns
+            except Exception as e:
+                st.error(f"❌ Error creating data object: {e}")
+                import traceback
+                with st.expander("Error details"):
+                    st.code(traceback.format_exc())
 
 
 # ============================================================================
-# SECTION 2: CLEAN & ANALYZE
+# PIPELINE WORKFLOW
 # ============================================================================
 
-def render_clean_analyze_section():
-    """Clean and analyze data quality"""
+def render_pipeline_workflow(current_obj: DataObject):
+    """Main pipeline workflow based on current stage"""
 
-    if not st.session_state.get('initialized'):
-        st.info("💡 Load a dataset first")
-        return
+    stage = current_obj.stage
 
-    st.markdown("### 🧹 Clean & Analyze")
+    # Show next actions based on stage
+    if stage == PipelineStage.RAW:
+        render_raw_actions(current_obj)
 
-    df = st.session_state.df
-    label_columns = st.session_state.label_columns
-    passage_col = st.session_state.passage_col
+    elif stage == PipelineStage.CLEANED:
+        render_cleaned_actions(current_obj)
+
+    elif stage == PipelineStage.EMBEDDED:
+        render_embedded_actions(current_obj)
+
+    elif stage == PipelineStage.SCORED:
+        render_scored_actions(current_obj)
+
+    elif stage == PipelineStage.TIERED:
+        render_tiered_actions(current_obj)
+
+
+# ============================================================================
+# STAGE-SPECIFIC ACTIONS
+# ============================================================================
+
+def render_raw_actions(obj: DataObject):
+    """Actions for RAW data"""
+
+    st.markdown("### 🧹 Clean Data Quality")
+
+    st.info("Analyze and clean your raw data before embedding")
 
     # Initialize analyzer
-    analyzer = DataAnalyzer(df, label_columns, passage_col)
+    analyzer = DataAnalyzer(obj.df, obj.label_columns, obj.passage_col)
 
     # Run analysis
     if st.button("🔎 Analyze Data Quality", type="primary"):
         with st.spinner("Analyzing..."):
             analysis = analyzer.analyze_quality()
-            st.session_state.quality_analysis = analysis
+            st.session_state['quality_analysis'] = analysis
 
     # Show results
-    if 'quality_analysis' in st.session_state:
-        analysis = st.session_state.quality_analysis
+    analysis = st.session_state.get('quality_analysis')
 
-        st.markdown("#### 📊 Analysis Results")
-
-        # Issues
+    if analysis:
+        # Display issues
         if analysis['issues']:
             st.markdown("**⚠️ Issues Found:**")
             for issue in analysis['issues']:
@@ -925,301 +849,346 @@ def render_clean_analyze_section():
         else:
             st.success("✅ No major issues detected!")
 
-        # Statistics
-        with st.expander("📈 Detailed Statistics", expanded=True):
-            stats = analysis['stats']
-
-            # Passage length stats
-            if 'passage_length' in stats:
-                st.markdown("**Passage Lengths:**")
-                length_stats = stats['passage_length']
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Mean", f"{length_stats['mean']:.0f} chars")
-                with col2:
-                    st.metric("Median", f"{length_stats['median']:.0f} chars")
-                with col3:
-                    st.metric("Std Dev", f"{length_stats['std']:.0f} chars")
-
-            # Label distribution
-            if 'label_distribution' in stats:
-                st.markdown("**Label Distribution:**")
-                dist_data = []
-                for label, info in stats['label_distribution'].items():
-                    dist_data.append({
-                        'Label': label,
-                        'Count': info['count'],
-                        'Percentage': f"{info['percentage']:.1f}%"
-                    })
-                st.dataframe(pd.DataFrame(dist_data), hide_index=True, width='stretch')
-
-        # Recommendations
-        if analysis['suggestions']:
-            st.markdown("#### 💡 Recommendations")
-            for suggestion in analysis['suggestions']:
-                st.info(suggestion)
-
+        # Show cleaning steps
         st.markdown("---")
-
-        # Cleaning workflow
-        st.markdown("### 🧹 Data Cleaning")
+        st.markdown("### Select Cleaning Steps")
 
         cleaning_steps = analyzer.suggest_cleaning_steps(analysis)
 
-        if cleaning_steps:
-            st.markdown("**Select cleaning steps to apply:**")
+        selected_actions = []
+        for step in cleaning_steps:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                selected = st.checkbox(
+                    step['name'],
+                    value=step['recommended'],
+                    key=f"clean_{step['action']}",
+                    help=step['description']
+                )
+                if selected:
+                    selected_actions.append(step['action'])
+            with col2:
+                st.caption(f"−{step['impact']}")
 
-            selected_actions = []
-            for step in cleaning_steps:
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    selected = st.checkbox(
-                        step['name'],
-                        value=step['recommended'],
-                        key=f"clean_{step['action']}",
-                        help=step['description']
+        if selected_actions:
+            st.markdown("---")
+
+            # Preview impact
+            total_removed = sum(s['impact'] for s in cleaning_steps if s['action'] in selected_actions)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Will Remove", total_removed)
+            with col2:
+                st.metric("Will Remain", len(obj.df) - total_removed)
+
+            # Name for cleaned object
+            default_name = f"cleaned_{obj.name}_{datetime.now().strftime('%H%M')}"
+            cleaned_name = st.text_input("New object name:", value=default_name)
+
+            if st.button("🧹 Apply Cleaning & Create CLEANED Object", type="primary"):
+                with st.spinner("Cleaning..."):
+                    df_cleaned = analyzer.apply_cleaning(selected_actions)
+
+                    # Create CLEANED data object
+                    pipeline = st.session_state.pipeline
+                    cleaned_obj = pipeline.create_cleaned(
+                        name=cleaned_name,
+                        parent_obj=obj,
+                        df_cleaned=df_cleaned,
+                        cleaning_steps=selected_actions
                     )
-                    if selected:
-                        selected_actions.append(step['action'])
-                with col2:
-                    impact_color = "🟢" if step['impact'] < len(df) * 0.05 else "🟡" if step['impact'] < len(
-                        df) * 0.1 else "🔴"
-                    st.caption(f"{impact_color} -{step['impact']}")
 
-            if selected_actions:
-                st.markdown("---")
-
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    total_removed = sum(
-                        step['impact'] for step in cleaning_steps if step['action'] in selected_actions)
-                    st.metric("Total Passages to Remove", total_removed)
-                    st.metric("Remaining", len(df) - total_removed)
-
-                with col2:
-                    if st.button("🧹 Apply Cleaning", type="primary"):
-                        with st.spinner("Cleaning data..."):
-                            df_clean = analyzer.apply_cleaning(selected_actions)
-                            st.session_state['cleaned_df'] = df_clean
-                            st.session_state['df'] = df_clean  # Update working df
-                            st.success(f"✅ Cleaned! {len(df)} → {len(df_clean)} passages")
-                            st.rerun()
-        else:
-            st.success("✅ Data is clean! No cleaning steps needed.")
+                    st.session_state['current_data_object'] = cleaned_obj
+                    st.success(f"✅ Created CLEANED object: {cleaned_name}")
+                    st.rerun()
 
 
-# ============================================================================
-# SECTION 3: EMBED & SCORE
-# ============================================================================
+def render_cleaned_actions(obj: DataObject):
+    """Actions for CLEANED data"""
 
-def render_embed_score_section():
-    """Embed passages and calculate quality scores"""
+    st.markdown("### 🔢 Generate Embeddings")
 
-    if not st.session_state.get('initialized'):
-        st.info("💡 Load a dataset first")
-        return
+    st.info("Generate semantic embeddings using Voyage AI")
 
-    st.markdown("### 🔢 Embed & Score")
+    # Check cache
+    cache_manager = st.session_state.cache_manager
+    has_cached = cache_manager.has_embeddings(obj.namespace)
 
-    df = st.session_state.df
-    label_columns = st.session_state.label_columns
-    passage_col = st.session_state.passage_col
-    finder = st.session_state.get('finder')
-    namespace = st.session_state.get('namespace', 'main')
+    if has_cached and not obj.has_embeddings:
+        st.warning("⚠️ Found cached embeddings! Load them instead of regenerating.")
 
-    if finder is None:
-        st.error("❌ Finder not initialized. Reload dataset.")
-        return
+        if st.button("📂 Load Cached Embeddings"):
+            embeddings = cache_manager.load_embeddings(obj.namespace)
+            obj.embeddings_cache = embeddings
+            st.success(f"✅ Loaded {len(embeddings)} cached embeddings")
+            st.rerun()
 
-    # FIX: Ensure cache is always a dict
-    cache = st.session_state.get('cache')
-    if cache is None:
-        cache = {}
-        st.session_state['cache'] = cache
+    batch_size = st.slider("Batch size:", 8, 64, 32)
 
-    has_embeddings = 'passage_id_map' in cache
-    has_scores = 'df_summary' in cache
+    # Name for embedded object
+    default_name = f"embedded_{obj.name}_{datetime.now().strftime('%H%M')}"
+    embedded_name = st.text_input("New object name:", value=default_name, key="embed_name_input")
 
-    # Status
+    if st.button("🚀 Generate Embeddings", type="primary"):
+        generate_embeddings(obj, batch_size, embedded_name)
+
+
+def render_embedded_actions(obj: DataObject):
+    """Actions for EMBEDDED data"""
+
+    st.markdown("### 📊 Calculate Quality Scores")
+
+    st.info("Calculate consistency and rerank scores")
+
+    # Check cache
+    cache_manager = st.session_state.cache_manager
+    has_cached = cache_manager.has_scores(obj.namespace)
+
+    if has_cached and not obj.has_scores:
+        st.warning("⚠️ Found cached scores! Load them instead of recalculating.")
+
+        if st.button("📂 Load Cached Scores"):
+            scores = cache_manager.load_scores(obj.namespace)
+            obj.scores_cache = scores
+            st.success(f"✅ Loaded {len(scores)} cached scores")
+            st.rerun()
+
+    k_similar = st.slider("Similar passages to check:", 5, 50, 20)
+
+    # Name for scored object
+    default_name = f"scored_{obj.name}_{datetime.now().strftime('%H%M')}"
+    scored_name = st.text_input("New object name:", value=default_name, key="score_name_input")
+
+    if st.button("🎯 Calculate Scores", type="primary"):
+        calculate_scores(obj, k_similar, scored_name)
+
+
+def render_scored_actions(obj: DataObject):
+    """Actions for SCORED data"""
+
+    st.markdown("### 🎯 Create Training Tiers")
+
+    st.info("Create quality-stratified training sets")
+
+    # Show score distribution
+    with st.expander("📊 Score Distribution", expanded=True):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Consistency**")
+            st.metric("Mean", f"{obj.scores_cache['consistency_avg'].mean():.3f}")
+            st.metric("Median", f"{obj.scores_cache['consistency_avg'].median():.3f}")
+
+        with col2:
+            st.markdown("**Rerank**")
+            st.metric("Mean", f"{obj.scores_cache['rerank_avg'].mean():.3f}")
+            st.metric("Median", f"{obj.scores_cache['rerank_avg'].median():.3f}")
+
+    st.markdown("---")
+
+    # Simple tier creation
+    st.markdown("#### Quick Tier Creation")
+
+    preset = st.selectbox(
+        "Configuration preset:",
+        ["Balanced", "Conservative (High Quality)", "Aggressive (More Data)"]
+    )
+
+    # Name for tiered object
+    default_name = f"tiered_{obj.name}_{datetime.now().strftime('%H%M')}"
+    tiered_name = st.text_input("New object name:", value=default_name, key="tier_name_input")
+
+    if st.button("🎯 Create Tiers", type="primary"):
+        with st.spinner("Creating tiers..."):
+            segmenter = DataSegmenter(obj.df, obj.scores_cache, obj.label_columns)
+
+            # Configure based on preset
+            if preset == "Balanced":
+                tier1_config = {'min_consistency': 0.65, 'min_rerank': 0.45, 'target_size': int(len(obj.df) * 0.12)}
+                tier2_config = {'min_consistency': 0.45, 'min_rerank': 0.30, 'target_size': int(len(obj.df) * 0.25)}
+            elif preset == "Conservative (High Quality)":
+                tier1_config = {'min_consistency': 0.70, 'min_rerank': 0.50, 'target_size': int(len(obj.df) * 0.10)}
+                tier2_config = {'min_consistency': 0.50, 'min_rerank': 0.35, 'target_size': int(len(obj.df) * 0.22)}
+            else:  # Aggressive
+                tier1_config = {'min_consistency': 0.60, 'min_rerank': 0.40, 'target_size': int(len(obj.df) * 0.15)}
+                tier2_config = {'min_consistency': 0.40, 'min_rerank': 0.25, 'target_size': int(len(obj.df) * 0.28)}
+
+            tier1, tier2, inference, metadata = segmenter.create_quality_tiers(
+                tier1_config, tier2_config
+            )
+
+            pipeline = st.session_state.pipeline
+            tiered_obj = pipeline.create_tiered(
+                name=tiered_name,
+                parent_obj=obj,
+                tier1_df=tier1,
+                tier2_df=tier2,
+                inference_df=inference,
+                tier_config=metadata
+            )
+
+            st.session_state['current_data_object'] = tiered_obj
+            st.success(f"✅ Created TIERED object: Tier 1: {len(tier1)}, Tier 2: {len(tier2)}, Inference: {len(inference)}")
+            st.balloons()
+            st.rerun()
+
+
+def render_tiered_actions(obj: DataObject):
+    """Actions for TIERED data"""
+
+    st.markdown("### ✅ Ready for Training")
+
+    st.success("Your tiered datasets are ready!")
+
+    # Show tier sizes
     col1, col2, col3 = st.columns(3)
 
+    tier_meta = obj.metadata.get('tier1_size', 0)
     with col1:
-        st.metric("Total Passages", len(df))
+        st.metric("Tier 1 (Elite)", obj.metadata.get('tier1_size', 'N/A'))
 
     with col2:
-        if has_embeddings:
-            st.metric("Embedded", len(cache['passage_id_map']))
-        else:
-            st.metric("Embedded", 0)
+        st.metric("Tier 2 (Expansion)", obj.metadata.get('tier2_size', 'N/A'))
 
     with col3:
-        if has_scores:
-            st.metric("Scored", len(cache['df_summary']))
-        else:
-            st.metric("Scored", 0)
+        st.metric("Inference (Test)", obj.metadata.get('inference_size', 'N/A'))
 
     st.markdown("---")
 
-    # Embed section
-    st.markdown("#### 1️⃣ Generate Embeddings")
+    st.markdown("**Next Steps:**")
+    st.markdown("1. Go to **Models** page")
+    st.markdown("2. Select this tiered object for training")
+    st.markdown("3. Choose training strategy (Tier 1 only, Combined, or Curriculum)")
 
-    if has_embeddings:
-        st.success(f"✅ Embeddings already exist for {len(cache['passage_id_map'])} passages")
-
-        if st.button("🔄 Recompute Embeddings"):
-            if 'cache' in st.session_state:
-                del st.session_state['cache']
-            st.rerun()
-    else:
-        st.info("Generate embeddings using Voyage AI for semantic search and scoring")
-
-        batch_size = st.slider("Batch size:", 8, 64, 32, help="Number of passages to embed at once")
-
-        if st.button("🚀 Generate Embeddings", type="primary"):
-            with st.spinner("Generating embeddings..."):
-                try:
-                    passage_id_map = finder.embed_and_store_passages(
-                        df=df,
-                        passage_column=passage_col,
-                        label_columns=label_columns,
-                        namespace=namespace,
-                        batch_size=batch_size
-                    )
-
-                    # Store in cache
-                    if 'cache' not in st.session_state:
-                        st.session_state['cache'] = {}
-
-                    st.session_state['cache']['passage_id_map'] = passage_id_map
-
-                    st.success(f"✅ Generated embeddings for {len(passage_id_map)} passages")
-                    st.rerun()
-
-                except Exception as e:
-                    st.error(f"❌ Error generating embeddings: {e}")
-
-    st.markdown("---")
-
-    # Score section
-    st.markdown("#### 2️⃣ Calculate Quality Scores")
-
-    if not has_embeddings:
-        st.warning("⚠️ Generate embeddings first")
-        return
-
-    if has_scores:
-        scores_df = cache['df_summary']
-        st.success(f"✅ Quality scores exist for {len(scores_df)} passages")
-
-        # Show score distribution
-        with st.expander("📊 Score Distribution", expanded=True):
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.markdown("**Consistency Scores**")
-                st.metric("Mean", f"{scores_df['consistency_avg'].mean():.3f}")
-                st.metric("Median", f"{scores_df['consistency_avg'].median():.3f}")
-
-            with col2:
-                st.markdown("**Rerank Scores**")
-                st.metric("Mean", f"{scores_df['rerank_avg'].mean():.3f}")
-                st.metric("Median", f"{scores_df['rerank_avg'].median():.3f}")
-
-        if st.button("🔄 Recompute Scores"):
-            if 'df_summary' in cache:
-                del cache['df_summary']
-            st.rerun()
-    else:
-        st.info("Calculate quality scores using similarity and reranking")
-
-        k_similar = st.slider("Similar passages to check:", 5, 50, 20,
-                             help="Number of similar passages to compare for consistency")
-
-        if st.button("🎯 Calculate Scores", type="primary"):
-            with st.spinner("Calculating quality scores..."):
-                try:
-                    start_time = datetime.now()
-
-                    # Get embedded indices
-                    passage_id_map = cache['passage_id_map']
-                    embedded_indices = list(passage_id_map.keys())
-
-                    # Calculate scores
-                    consistency_scores = {}
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-
-                    for i, idx in enumerate(embedded_indices):
-                        # Find similar passages
-                        similar = finder.find_similar_passages(
-                            query_idx=idx,
-                            k=k_similar,
-                            namespace=namespace
-                        )
-
-                        # Calculate consistency
-                        consistency = finder.calculate_label_consistency(
-                            query_idx=idx,
-                            similar_passages=similar,
-                            label_columns=label_columns,
-                            namespace=namespace
-                        )
-
-                        # Get active labels
-                        passage_labels = [label for label in label_columns
-                                        if df.loc[idx, label] == 1]
-
-                        if passage_labels:
-                            avg_consistency = sum(consistency[label] for label in passage_labels) / len(passage_labels)
-                        else:
-                            avg_consistency = 0.0
-
-                        consistency_scores[idx] = avg_consistency
-
-                        # Update progress
-                        progress = (i + 1) / len(embedded_indices)
-                        progress_bar.progress(progress)
-                        status_text.text(f"Processing: {i + 1}/{len(embedded_indices)}")
-
-                    progress_bar.empty()
-                    status_text.empty()
-
-                    # Create summary dataframe
-                    summary_data = []
-                    for idx in embedded_indices:
-                        summary_data.append({
-                            'passage_idx': idx,
-                            'consistency_avg': consistency_scores[idx],
-                            'rerank_avg': consistency_scores[idx]  # Simplified for now
-                        })
-
-                    scores_df = pd.DataFrame(summary_data)
-
-                    # Store in cache
-                    cache['df_summary'] = scores_df
-
-                    elapsed = (datetime.now() - start_time).total_seconds()
-                    st.success(f"✅ Calculated scores for {len(scores_df)} passages in {elapsed:.1f}s")
-                    st.rerun()
-
-                except Exception as e:
-                    st.error(f"❌ Error calculating scores: {e}")
-                    import traceback
-                    with st.expander("Error details"):
-                        st.code(traceback.format_exc())
+    # Quick training link
+    if st.button("🎓 Go to Training →", type="primary"):
+        st.info("Navigate to **Models** page in the sidebar")
 
 
 # ============================================================================
-# SECTION 4: CREATE TRAINING SETS
+# HELPER FUNCTIONS
 # ============================================================================
 
-def render_create_training_sets_section():
-    """Create tiered training datasets"""
+def generate_embeddings(obj: DataObject, batch_size: int, embedded_name: str):
+    """Generate embeddings with checkpointing"""
 
-    if not st.session_state.get('initialized'):
-        st.info("💡 Load a dataset first")
+    finder = st.session_state.get('finder')
+    if finder is None:
+        st.error("❌ Finder not initialized")
         return
 
-    # Use the existing comprehensive implementation from data_preparation.py
-    render_data_preparation_page(dict(st.session_state))
+    with st.spinner("Generating embeddings..."):
+        try:
+            # Embed with checkpointing
+            passage_id_map = finder.embed_and_store_passages(
+                df=obj.df,
+                passage_column=obj.passage_col,
+                label_columns=obj.label_columns,
+                namespace=obj.namespace,
+                batch_size=batch_size
+            )
+
+            # Save to cache
+            cache_manager = st.session_state.cache_manager
+            cache_manager.save_embeddings(obj.namespace, passage_id_map)
+
+            # Create EMBEDDED object
+            pipeline = st.session_state.pipeline
+            embedded_obj = pipeline.create_embedded(
+                name=embedded_name,
+                parent_obj=obj,
+                embeddings_cache=passage_id_map
+            )
+
+            st.session_state['current_data_object'] = embedded_obj
+            st.success(f"✅ Created EMBEDDED object: {embedded_name}")
+            st.balloons()
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
+            import traceback
+            with st.expander("Error details"):
+                st.code(traceback.format_exc())
+
+
+def calculate_scores(obj: DataObject, k_similar: int, scored_name: str):
+    """Calculate quality scores with checkpointing"""
+
+    finder = st.session_state.get('finder')
+    if finder is None:
+        st.error("❌ Finder not initialized")
+        return
+
+    with st.spinner("Calculating scores..."):
+        try:
+            embedded_indices = list(obj.embeddings_cache.keys())
+
+            # Calculate scores
+            consistency_scores = {}
+            progress = st.progress(0)
+            status = st.empty()
+
+            for i, idx in enumerate(embedded_indices):
+                similar = finder.find_similar_passages(
+                    query_idx=idx,
+                    k=k_similar,
+                    namespace=obj.namespace
+                )
+
+                consistency = finder.calculate_label_consistency(
+                    query_idx=idx,
+                    similar_passages=similar,
+                    label_columns=obj.label_columns,
+                    namespace=obj.namespace
+                )
+
+                passage_labels = [l for l in obj.label_columns if obj.df.loc[idx, l] == 1]
+
+                if passage_labels:
+                    avg = sum(consistency[l] for l in passage_labels) / len(passage_labels)
+                else:
+                    avg = 0.0
+
+                consistency_scores[idx] = avg
+
+                # Update progress
+                pct = (i + 1) / len(embedded_indices)
+                progress.progress(pct)
+                status.text(f"Processing: {i + 1}/{len(embedded_indices)}")
+
+            progress.empty()
+            status.empty()
+
+            # Create scores DataFrame
+            scores_df = pd.DataFrame([
+                {
+                    'passage_idx': idx,
+                    'consistency_avg': consistency_scores[idx],
+                    'rerank_avg': consistency_scores[idx]  # Simplified
+                }
+                for idx in embedded_indices
+            ])
+
+            # Save to cache
+            cache_manager = st.session_state.cache_manager
+            cache_manager.save_scores(obj.namespace, scores_df)
+
+            # Create SCORED object
+            pipeline = st.session_state.pipeline
+            scored_obj = pipeline.create_scored(
+                name=scored_name,
+                parent_obj=obj,
+                scores_df=scores_df
+            )
+
+            st.session_state['current_data_object'] = scored_obj
+            st.success(f"✅ Created SCORED object: {scored_name}")
+            st.balloons()
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
+            import traceback
+            with st.expander("Error details"):
+                st.code(traceback.format_exc())
