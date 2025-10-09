@@ -12,10 +12,7 @@ from pathlib import Path
 import json
 from datetime import datetime
 import matplotlib.pyplot as plt
-import seaborn as sns
-from typing import Dict, List, Optional, Tuple
-import time
-import os
+from typing import Dict, List, Tuple
 
 from transformers import (
     Trainer,
@@ -26,18 +23,18 @@ from transformers import (
     AutoConfig,
 )
 from datasets import Dataset
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import f1_score, classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score
 
 # Import model architecture from model_inference
-from model_inference import (
+from GOLDEN_DATASET.core.model_inference import (
     ConfigurableHierarchicalConfig,
     ConfigurableHierarchicalModel,
     HRAFModelLoader
 )
 
 # Import DataExperiment from data_preparation
-from data_preparation import DataExperiment
+from GOLDEN_DATASET.core.data_preparation import DataExperiment
 
 
 class TrainingSession:
