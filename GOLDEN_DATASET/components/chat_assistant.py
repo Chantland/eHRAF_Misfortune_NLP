@@ -472,9 +472,9 @@ ACTION: semantic_search(query='shamans healing illness', top_k=10)"
         return system_blocks
 
     def _build_dataset_context(self, session_state: Dict) -> str:
-        """Build detailed dataset context (reuse existing implementation)"""
+        """Build detailed dataset AND training context (enhanced)"""
 
-        parts = ["# Dataset Context\n"]
+        parts = ["# Dataset & Training Context\n"]
 
         df = session_state.get('df')
         if df is None:
@@ -484,7 +484,7 @@ ACTION: semantic_search(query='shamans healing illness', top_k=10)"
         label_columns = session_state.get('label_columns', [])
 
         # Basic stats
-        parts.append(f"## Overview")
+        parts.append(f"## Dataset Overview")
         parts.append(f"- Total passages: {len(df)}")
         parts.append(f"- Valid passages: {df[passage_col].notna().sum()}")
         parts.append(f"- Label columns: {len(label_columns)}")
@@ -509,6 +509,118 @@ ACTION: semantic_search(query='shamans healing illness', top_k=10)"
                 parts.append(f"- Consistency mean: {scores['consistency_avg'].mean():.3f}")
                 parts.append(f"- Rerank mean: {scores['rerank_avg'].mean():.3f}")
 
+        # ======================================================================
+        # TRAINING CONTEXT (NEW)
+        # ======================================================================
+
+        training_config = session_state.get('training_config')
+        if training_config:
+            parts.append(f"\n## Training Configuration")
+            parts.append(f"- **Experiment**: {training_config.get('experiment_name', 'Unnamed')}")
+            parts.append(f"- **Base Model**: {training_config.get('base_model', 'unknown')}")
+            parts.append(f"- **Hierarchical**: {training_config.get('use_hierarchy', False)}")
+
+            if training_config.get('use_hierarchy'):
+                parts.append(f"  - Gated: {training_config.get('gated_hierarchy', False)}")
+                parts.append(f"  - Gate threshold: {training_config.get('gate_threshold', 0.5)}")
+                parts.append(f"  - Predict main labels: {training_config.get('predict_main_labels', False)}")
+
+                # Hierarchy details
+                hierarchy = training_config.get('hierarchy_config')
+                if hierarchy and 'categories' in hierarchy:
+                    parts.append(f"  - Main categories configured: {len(hierarchy['categories'])}")
+                    for cat_name, cat_data in hierarchy['categories'].items():
+                        if cat_data.get('enabled'):
+                            parts.append(f"    - {cat_name}: {len(cat_data['sublabels'])} sublabels")
+
+            parts.append(f"- **Loss Configuration**:")
+            parts.append(f"  - Focal loss: {training_config.get('use_focal_loss', False)}")
+            if training_config.get('use_focal_loss'):
+                parts.append(f"  - Focal gamma: {training_config.get('focal_gamma', 2.0)}")
+            parts.append(f"  - Weighted loss: {training_config.get('use_weighted_loss', False)}")
+
+            parts.append(f"- **Training Parameters**:")
+            parts.append(f"  - Epochs: {training_config.get('num_epochs', 10)}")
+            parts.append(f"  - Batch size: {training_config.get('batch_size', 16)}")
+            parts.append(f"  - Learning rate: {training_config.get('learning_rate', 2e-5):.2e}")
+            parts.append(f"  - Max length: {training_config.get('max_length', 512)}")
+
+        # Training status
+        training_active = session_state.get('training_active', False)
+        if training_active:
+            parts.append(f"\n## 🔴 Training Status: ACTIVE")
+            current_epoch = session_state.get('current_epoch', 0)
+            total_epochs = training_config.get('num_epochs', 10) if training_config else 10
+            parts.append(f"- Current epoch: {current_epoch}/{total_epochs}")
+            parts.append(f"- Progress: {(current_epoch / total_epochs) * 100:.1f}%")
+
+        # Training history
+        training_history = session_state.get('training_history', [])
+        if training_history:
+            parts.append(f"\n## Training History ({len(training_history)} epochs logged)")
+
+            # Show last 3 epochs
+            recent = training_history[-3:]
+            parts.append(f"\n### Recent Epochs:")
+            for log in recent:
+                epoch = log.get('epoch', 0)
+                train_loss = log.get('train_loss', 0)
+                eval_loss = log.get('eval_loss', 0)
+                f1_micro = log.get('eval_f1_micro', 0)
+                f1_macro = log.get('eval_f1_macro', 0)
+
+                parts.append(f"\n**Epoch {epoch}:**")
+                parts.append(f"- Train loss: {train_loss:.4f}")
+                parts.append(f"- Val loss: {eval_loss:.4f}")
+                parts.append(f"- F1 micro: {f1_micro:.3f}")
+                parts.append(f"- F1 macro: {f1_macro:.3f}")
+
+                # Check for individual label F1s
+                label_f1s = {k: v for k, v in log.items() if
+                             k.startswith('eval_f1_') and k not in ['eval_f1_micro', 'eval_f1_macro']}
+                if label_f1s:
+                    # Show labels with F1 > 0
+                    active_labels = {k.replace('eval_f1_', ''): v for k, v in label_f1s.items() if v > 0}
+                    if active_labels:
+                        parts.append(f"- Active labels: {len(active_labels)}/{len(label_f1s)}")
+                        # Show top 5
+                        top_5 = sorted(active_labels.items(), key=lambda x: x[1], reverse=True)[:5]
+                        for label, score in top_5:
+                            parts.append(f"  - {label}: {score:.3f}")
+
+        # Test results
+        test_results = session_state.get('test_results')
+        if test_results:
+            parts.append(f"\n## Test Results (Final)")
+            parts.append(f"- F1 Micro: {test_results.get('eval_f1_micro', 0):.3f}")
+            parts.append(f"- F1 Macro: {test_results.get('eval_f1_macro', 0):.3f}")
+
+            # Count labels by performance
+            label_f1s = {k: v for k, v in test_results.items() if
+                         k.startswith('eval_f1_') and k not in ['eval_f1_micro', 'eval_f1_macro']}
+            good = sum(1 for v in label_f1s.values() if v > 0.7)
+            fair = sum(1 for v in label_f1s.values() if 0.5 < v <= 0.7)
+            poor = sum(1 for v in label_f1s.values() if 0 < v <= 0.5)
+            zero = sum(1 for v in label_f1s.values() if v == 0)
+
+            parts.append(f"- Labels > 0.7: {good}")
+            parts.append(f"- Labels 0.5-0.7: {fair}")
+            parts.append(f"- Labels 0-0.5: {poor}")
+            parts.append(f"- Labels = 0: {zero}")
+
+            if zero > 0:
+                parts.append(f"\n**⚠️ WARNING: {zero} labels have F1=0 (model never predicts them)**")
+                zero_labels = [k.replace('eval_f1_', '') for k, v in label_f1s.items() if v == 0]
+                parts.append(f"Zero-F1 labels: {', '.join(zero_labels[:10])}")
+
+        # Training completion
+        training_complete = session_state.get('training_complete', False)
+        if training_complete:
+            output_dir = session_state.get('training_output_dir')
+            parts.append(f"\n## ✅ Training Complete")
+            if output_dir:
+                parts.append(f"- Model saved to: {output_dir}")
+
         # Loaded models
         loaded_models = session_state.get('loaded_models', {})
         manager = session_state.get('model_manager')
@@ -528,28 +640,31 @@ ACTION: semantic_search(query='shamans healing illness', top_k=10)"
 
         if "📊 Data" in current_page:
             return """
-- load_dataset(source='file/experiment/upload')
-- clean_data(remove_duplicates=True, remove_missing=True)
-- generate_embeddings(batch_size=32)
-- calculate_scores(k_similar=20)
-- create_tiers(preset='balanced/conservative/aggressive')
-"""
+    - load_dataset(source='file/experiment/upload')
+    - clean_data(remove_duplicates=True, remove_missing=True)
+    - generate_embeddings(batch_size=32)
+    - calculate_scores(k_similar=20)
+    - create_tiers(preset='balanced/conservative/aggressive')
+    """
 
-        elif "🤖 Models" in current_page:
+        elif "🤖 Models" in current_page or "Train" in current_page:
             return """
-- load_model(model_name='...')
-- start_training(dataset='...', config={...})
-- evaluate_model(model_name='...', num_passages=100)
-- compare_models(model_names=['...', '...'])
-"""
+    - analyze_training_config() - Review current training configuration
+    - suggest_improvements() - Suggest ways to improve model performance
+    - explain_metric(metric_name='f1_micro') - Explain a training metric
+    - diagnose_zero_labels() - Analyze why labels have F1=0
+    - recommend_hyperparameters() - Suggest better hyperparameters
+    - compare_to_baseline() - Compare current performance to baseline
+    - adjust_config(parameter='focal_gamma', value=3.5) - Adjust training config
+    """
 
         elif "🔍 Discover" in current_page:
             return """
-- semantic_search(query='...', top_k=10, label_filter='...')
-- find_similar(passage_idx=123, k=20)
-- run_inference(passage_idx=123, model_names=['...'])
-- test_hypothesis(label_a='...', label_b='...')
-"""
+    - semantic_search(query='...', top_k=10, label_filter='...')
+    - find_similar(passage_idx=123, k=20)
+    - run_inference(passage_idx=123, model_names=['...'])
+    - test_hypothesis(label_a='...', label_b='...')
+    """
 
         else:
             return "- navigate_to(page='Data/Models/Discover')"

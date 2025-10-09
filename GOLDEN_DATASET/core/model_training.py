@@ -1,6 +1,6 @@
 """
 Model Training Module for HRAF Golden Dataset Discovery
-Provides UI and backend for training hierarchical multi-label models
+Comprehensive training system with interactive hierarchy configuration
 """
 
 import streamlit as st
@@ -12,7 +12,8 @@ from pathlib import Path
 import json
 from datetime import datetime
 import matplotlib.pyplot as plt
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
+import copy
 
 from transformers import (
     Trainer,
@@ -24,21 +25,25 @@ from transformers import (
 )
 from datasets import Dataset
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 
-# Import model architecture from model_inference
+# Import model architecture
 from core.model_inference import (
     ConfigurableHierarchicalConfig,
     ConfigurableHierarchicalModel,
     HRAFModelLoader
 )
 
-# Import DataExperiment from data_preparation
+# Import data utilities
 from core.data_preparation import DataExperiment
 
 
+# ============================================================================
+# TRAINING SESSION MANAGEMENT
+# ============================================================================
+
 class TrainingSession:
-    """Manages a model training session"""
+    """Manages a model training session with all state and configuration"""
 
     def __init__(self, config: Dict, output_dir: str):
         self.config = config
@@ -55,7 +60,7 @@ class TrainingSession:
         self.best_metrics = {}
         self.current_epoch = 0
 
-    def initialize_model(self, label_dims: Dict):
+    def initialize_model(self, label_dims: Dict) -> Dict:
         """Initialize model with configuration"""
 
         # Register custom model classes
@@ -65,8 +70,8 @@ class TrainingSession:
         model_config = ConfigurableHierarchicalConfig(
             base_model=self.config["base_model"],
             use_hierarchy=self.config["use_hierarchy"],
-            gated_hierarchy=self.config["gated_hierarchy"],
-            gate_threshold=self.config["gate_threshold"],
+            gated_hierarchy=self.config.get("gated_hierarchy", False),
+            gate_threshold=self.config.get("gate_threshold", 0.5),
             hidden_size=self.config["hidden_size"],
             hierarchical_hidden_size=self.config["hierarchical_hidden_size"],
             num_hidden_layers=self.config["num_hidden_layers"],
@@ -74,9 +79,8 @@ class TrainingSession:
             attention_dropout=self.config["attention_dropout"],
             use_weighted_loss=self.config["use_weighted_loss"],
             use_focal_loss=self.config["use_focal_loss"],
-            focal_gamma=self.config["focal_gamma"],
-            teacher_forcing_ratio=self.config["teacher_forcing_ratio"],
-            predict_main_labels=self.config["predict_main_labels"],
+            focal_gamma=self.config.get("focal_gamma", 2.0),
+            teacher_forcing_ratio=self.config.get("teacher_forcing_ratio", 0.5),
             num_main_labels=label_dims["num_main_labels"],
             num_event_labels=label_dims["num_event_labels"],
             num_cause_labels=label_dims["num_cause_labels"],
@@ -134,325 +138,296 @@ class HierarchicalTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
-def get_training_data_from_session(session_state: Dict) -> Tuple[pd.DataFrame, List[str], str]:
-    """
-    Extract training data from session state
-    Handles both DataObject and legacy flat state
+# ============================================================================
+# HIERARCHY CONFIGURATION
+# ============================================================================
 
-    Returns:
-        Tuple of (df, label_columns, passage_col)
-
-    Raises:
-        ValueError: If no dataset loaded
-    """
-    # Priority 1: Check for current_data_object
-    if 'current_data_object' in session_state and session_state['current_data_object'] is not None:
-        obj = session_state['current_data_object']
-        return obj.df.copy(), obj.label_columns.copy(), obj.passage_col
-
-    # Priority 2: Check for legacy flat state
-    if session_state.get('initialized'):
-        df = session_state.get('df')
-        label_columns = session_state.get('label_columns', [])
-        passage_col = session_state.get('passage_col', 'Passage')
-
-        if df is not None:
-            return df.copy(), label_columns.copy(), passage_col
-
-    # No data loaded
-    raise ValueError("No dataset loaded. Load a dataset from the Data page.")
-
-
-def select_training_dataset(
-        session_state: Dict,
-        default_df: pd.DataFrame,
-        default_labels: List[str],
-        default_passage: str
-) -> Dict:
-    """
-    Handle dataset selection UI
-
-    Returns:
-        Dict with keys: 'df', 'label_columns', 'passage_col'
-    """
-    dataset_source = st.radio(
-        "Data source:",
-        ["Current Dataset", "Browse Experiments", "Browse DataObjects"],
-        horizontal=True,
-        key="training_dataset_source"
-    )
-
-    if dataset_source == "Current Dataset":
-        st.info(f"Using current dataset: {len(default_df):,} passages")
-        return {
-            'df': default_df,
-            'label_columns': default_labels,
-            'passage_col': default_passage
+def get_hraf_template() -> Dict:
+    """Standard HRAF misfortune classification hierarchy template"""
+    return {
+        'categories': {
+            'EVENT': {
+                'sublabels': ['Illness', 'Accident', 'Other'],
+                'enabled': True
+            },
+            'CAUSE': {
+                'sublabels': ['Material_Physical', 'Spirits_Gods',
+                             'Witchcraft_Sorcery', 'Rule_Violation_Taboo'],
+                'enabled': True
+            },
+            'ACTION': {
+                'sublabels': ['Physical_Material', 'Technical_Specialist',
+                             'Divination', 'Shaman_Medium_Healer', 'Priest_High_Religion'],
+                'enabled': True
+            }
         }
-
-    elif dataset_source == "Browse Experiments":
-        return _select_from_experiments(session_state, default_df, default_labels, default_passage)
-
-    elif dataset_source == "Browse DataObjects":
-        return _select_from_data_objects(session_state, default_df, default_labels, default_passage)
-
-
-def _select_from_experiments(
-        session_state: Dict,
-        default_df: pd.DataFrame,
-        default_labels: List[str],
-        default_passage: str
-) -> Dict:
-    """Select dataset from saved experiments"""
-
-    experiment = DataExperiment()
-    experiments = experiment.list_experiments()
-
-    if not experiments:
-        st.warning("No experiments found. Using current dataset.")
-        return {
-            'df': default_df,
-            'label_columns': default_labels,
-            'passage_col': default_passage
-        }
-
-    # Select experiment
-    exp_names = [exp['name'] for exp in experiments]
-    selected_exp_name = st.selectbox(
-        "Select experiment:",
-        exp_names,
-        key="exp_selector"
-    )
-
-    selected_exp = next((exp for exp in experiments if exp['name'] == selected_exp_name), None)
-
-    if not selected_exp:
-        st.error("Could not load selected experiment. Using current dataset.")
-        return {
-            'df': default_df,
-            'label_columns': default_labels,
-            'passage_col': default_passage
-        }
-
-    meta = selected_exp['metadata']
-    exp_type = meta.get('experiment_type', 'unknown')
-
-    # Show experiment info
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if 'statistics' in meta:
-            st.metric("Passages", meta['statistics']['num_passages'])
-        elif 'tiers' in meta:
-            total = sum(tier_data.get('count', 0) for tier_data in meta['tiers'].values())
-            st.metric("Passages", total)
-        else:
-            st.metric("Passages", "N/A")
-
-    with col2:
-        if 'statistics' in meta:
-            st.metric("Labels", len(meta['statistics']['label_columns']))
-        elif 'label_columns' in meta:
-            st.metric("Labels", len(meta['label_columns']))
-        else:
-            st.metric("Labels", "N/A")
-
-    with col3:
-        st.metric("Type", exp_type)
-
-    # Load data
-    try:
-        if exp_type == 'tiered_training':
-            tier_choice = st.radio(
-                "Select tier(s):",
-                ["Tier 1 Only", "Tier 1 + Tier 2 Combined"],
-                horizontal=True,
-                key="tier_choice_exp"
-            )
-
-            if "Tier 1 Only" in tier_choice:
-                data_file = selected_exp['directory'] / "tier1.xlsx"
-                training_df = pd.read_excel(data_file)
-                st.info(f"✅ Loaded Tier 1: {len(training_df):,} passages")
-            else:
-                data_file = selected_exp['directory'] / "tier1_tier2_combined.xlsx"
-                training_df = pd.read_excel(data_file)
-                st.info(f"✅ Loaded Combined: {len(training_df):,} passages")
-
-            # Get columns from metadata
-            labels = meta.get('label_columns', default_labels)
-            passage = meta.get('passage_column', default_passage)
-
-        else:
-            # Regular experiment
-            data_file = selected_exp['directory'] / "data.xlsx"
-            training_df = pd.read_excel(data_file)
-            st.info(f"✅ Loaded experiment: {len(training_df):,} passages")
-
-            if 'statistics' in meta:
-                labels = meta['statistics']['label_columns']
-                passage = meta['statistics']['passage_column']
-            else:
-                labels = meta.get('label_columns', default_labels)
-                passage = meta.get('passage_column', default_passage)
-
-        return {
-            'df': training_df,
-            'label_columns': labels,
-            'passage_col': passage
-        }
-
-    except Exception as e:
-        st.error(f"Error loading experiment: {e}")
-        st.info("Using current dataset as fallback")
-        return {
-            'df': default_df,
-            'label_columns': default_labels,
-            'passage_col': default_passage
-        }
-
-
-def _select_from_data_objects(
-        session_state: Dict,
-        default_df: pd.DataFrame,
-        default_labels: List[str],
-        default_passage: str
-) -> Dict:
-    """Select dataset from DataObjects"""
-
-    from core.data_objects import DataObjectManager, PipelineStage
-
-    manager = DataObjectManager()
-    objects = manager.list_objects()
-
-    if not objects:
-        st.warning("No DataObjects found. Using current dataset.")
-        return {
-            'df': default_df,
-            'label_columns': default_labels,
-            'passage_col': default_passage
-        }
-
-    # Filter to useful stages (CLEANED, SCORED, TIERED)
-    useful_objects = [
-        obj for obj in objects
-        if obj['stage'] in ['cleaned', 'scored', 'tiered']
-    ]
-
-    if not useful_objects:
-        st.warning("No suitable DataObjects found. Using current dataset.")
-        return {
-            'df': default_df,
-            'label_columns': default_labels,
-            'passage_col': default_passage
-        }
-
-    # Select object
-    obj_names = [f"{obj['name']} ({obj['stage']})" for obj in useful_objects]
-    selected_name = st.selectbox(
-        "Select DataObject:",
-        obj_names,
-        key="dataobj_selector"
-    )
-
-    selected_idx = obj_names.index(selected_name)
-    selected_obj_meta = useful_objects[selected_idx]
-
-    try:
-        # Load the object
-        data_obj = manager.load(
-            selected_obj_meta['name'],
-            PipelineStage(selected_obj_meta['stage'])
-        )
-
-        if data_obj is None:
-            raise ValueError("Failed to load DataObject")
-
-        st.success(f"✅ Loaded: {len(data_obj.df):,} passages from {data_obj.stage.value} stage")
-
-        # For tiered objects, offer tier selection
-        if data_obj.stage == PipelineStage.TIERED:
-            tier_choice = st.radio(
-                "Select tier(s):",
-                ["Tier 1 Only", "Tier 1 + Tier 2 Combined", "Full Dataset"],
-                horizontal=True,
-                key="tier_choice_obj"
-            )
-
-            obj_dir = Path(selected_obj_meta.get('directory', '.'))
-
-            if "Tier 1 Only" in tier_choice and (obj_dir / "tier1.xlsx").exists():
-                tier_df = pd.read_excel(obj_dir / "tier1.xlsx")
-                st.info(f"Using Tier 1: {len(tier_df):,} passages")
-                return {
-                    'df': tier_df,
-                    'label_columns': data_obj.label_columns,
-                    'passage_col': data_obj.passage_col
-                }
-            elif "Combined" in tier_choice and (obj_dir / "tier1_tier2_combined.xlsx").exists():
-                combined_df = pd.read_excel(obj_dir / "tier1_tier2_combined.xlsx")
-                st.info(f"Using Combined: {len(combined_df):,} passages")
-                return {
-                    'df': combined_df,
-                    'label_columns': data_obj.label_columns,
-                    'passage_col': data_obj.passage_col
-                }
-
-        return {
-            'df': data_obj.df,
-            'label_columns': data_obj.label_columns,
-            'passage_col': data_obj.passage_col
-        }
-
-    except Exception as e:
-        st.error(f"Error loading DataObject: {e}")
-        st.info("Using current dataset as fallback")
-        return {
-            'df': default_df,
-            'label_columns': default_labels,
-            'passage_col': default_passage
-        }
-
-
-def sanitize_config_types(config: Dict) -> Dict:
-    """Ensure config values have correct types"""
-    numeric_fields = {
-        'num_epochs': int,
-        'batch_size': int,
-        'learning_rate': float,
-        'warmup_steps': int,
-        'weight_decay': float,
-        'gradient_accumulation_steps': int,
-        'max_length': int,
-        'label_smoothing': float,
-        'focal_gamma': float,
-        'gate_threshold': float,
-        'teacher_forcing_ratio': float,
-        'dropout': float,
-        'attention_dropout': float,
-        'test_size': float,
-        'validation_size': float,
-        'random_seed': int,
-        'n_splits': int,
-        'hidden_size': int,
-        'hierarchical_hidden_size': int,
-        'num_hidden_layers': int
     }
 
-    for field, field_type in numeric_fields.items():
-        if field in config and not isinstance(config[field], field_type):
-            try:
-                config[field] = field_type(config[field])
-            except (ValueError, TypeError):
-                # Use default if conversion fails
-                defaults = get_default_training_config()
-                if field in defaults:
-                    config[field] = defaults[field]
 
-    return config
+def render_hierarchy_configuration(
+        label_columns: List[str],
+        session_state: Dict,
+        config_key: str = 'hierarchy_config'
+) -> Dict:
+    """
+    Interactive hierarchy builder UI
+
+    Now directly manages session state to ensure changes persist
+    """
+
+    st.markdown("#### 🏗️ Hierarchy Configuration")
+    st.caption("Define main categories and map sublabels to them")
+
+    # Initialize hierarchy in session state if needed
+    if config_key not in session_state:
+        session_state[config_key] = {'categories': {}}
+
+    hierarchy = session_state[config_key]
+
+    # Quick start templates
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if st.button("🚀 Use HRAF Template", use_container_width=True):
+            session_state[config_key] = get_hraf_template()
+            st.success("✅ HRAF template loaded")
+            st.rerun()
+
+    with col2:
+        if st.button("🧹 Clear All", use_container_width=True):
+            session_state[config_key] = {'categories': {}}
+            st.rerun()
+
+    with col3:
+        if st.button("🔄 Auto-detect", use_container_width=True,
+                     help="Detect hierarchy from column prefixes (EVENT_Illness, etc)"):
+            detected = auto_detect_hierarchy(label_columns)
+            if detected['categories']:
+                session_state[config_key] = detected
+                st.success(f"✅ Detected {len(detected['categories'])} categories")
+            else:
+                st.warning("⚠️ Could not detect hierarchy from column names")
+            st.rerun()
+
+    st.markdown("---")
+
+    # Add new category
+    with st.expander("➕ Add Main Category", expanded=len(hierarchy['categories']) == 0):
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            new_category = st.text_input(
+                "Category name:",
+                placeholder="e.g., EVENT, CAUSE, ACTION",
+                key="new_category_input"
+            )
+
+        with col2:
+            st.write("")  # Spacing
+            st.write("")  # Spacing
+            if st.button("Add", type="primary", disabled=not new_category, use_container_width=True):
+                if new_category and new_category not in hierarchy['categories']:
+                    # Modify the hierarchy in session state
+                    session_state[config_key]['categories'][new_category] = {
+                        'sublabels': [],
+                        'enabled': True
+                    }
+                    st.success(f"✅ Added {new_category}")
+                    st.rerun()
+                elif new_category in hierarchy['categories']:
+                    st.error("Category already exists")
+
+    # Configure existing categories
+    if not hierarchy['categories']:
+        st.info("💡 Add main categories above or use a template to get started")
+        return hierarchy
+
+    st.markdown("**Configure Categories:**")
+
+    # Track changes
+    changes_made = False
+
+    for category_name in list(hierarchy['categories'].keys()):
+        category = hierarchy['categories'][category_name]
+
+        with st.expander(
+                f"{'✅' if category['enabled'] else '❌'} {category_name} ({len(category['sublabels'])} sublabels)",
+                expanded=True
+        ):
+            # Get available sublabels
+            assigned_labels = set()
+            for other_cat_name, other_cat in hierarchy['categories'].items():
+                if other_cat_name != category_name:
+                    assigned_labels.update(other_cat['sublabels'])
+
+            available_labels = [l for l in label_columns if l not in assigned_labels]
+            all_options = sorted(set(available_labels + category['sublabels']))
+
+            # Sublabel selection
+            selected = st.multiselect(
+                f"Sublabels under **{category_name}**:",
+                options=all_options,
+                default=category['sublabels'],
+                key=f"sublabels_{category_name}",
+                help="Select which sublabels belong to this main category"
+            )
+
+            # Check if changed
+            if selected != category['sublabels']:
+                session_state[config_key]['categories'][category_name]['sublabels'] = selected
+                changes_made = True
+
+            # Controls row
+            col1, col2, col3 = st.columns([2, 2, 1])
+
+            with col1:
+                enabled = st.checkbox(
+                    "Enable category",
+                    value=category['enabled'],
+                    key=f"enabled_{category_name}"
+                )
+
+                if enabled != category['enabled']:
+                    session_state[config_key]['categories'][category_name]['enabled'] = enabled
+                    changes_made = True
+
+            with col2:
+                st.caption(f"**{len(selected)}** sublabels mapped")
+
+            with col3:
+                if st.button("🗑️ Delete", key=f"remove_{category_name}", use_container_width=True):
+                    del session_state[config_key]['categories'][category_name]
+                    st.rerun()
+
+    # Validation summary
+    st.markdown("---")
+    st.markdown("**📊 Validation Summary:**")
+
+    # Calculate stats
+    enabled_categories = [name for name, cat in hierarchy['categories'].items() if cat['enabled']]
+    all_mapped = set()
+    for cat in hierarchy['categories'].values():
+        if cat['enabled']:
+            all_mapped.update(cat['sublabels'])
+
+    unmapped = [l for l in label_columns if l not in all_mapped]
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("Enabled Categories", len(enabled_categories))
+
+    with col2:
+        st.metric("Mapped Sublabels", len(all_mapped))
+
+    with col3:
+        st.metric("Total Labels", len(all_mapped) + len(enabled_categories))
+
+    with col4:
+        if unmapped:
+            st.metric("⚠️ Unmapped", len(unmapped))
+        else:
+            st.metric("✅ Unmapped", 0)
+
+    # Show unmapped labels
+    if unmapped:
+        with st.expander("⚠️ Show unmapped labels"):
+            st.warning(f"These {len(unmapped)} labels are not assigned to any category:")
+            for label in unmapped:
+                st.text(f"• {label}")
+            st.info("💡 Unmapped labels will not be used in training")
+
+    # Preview hierarchy
+    with st.expander("👁️ Preview Hierarchy Structure"):
+        for category_name, category in hierarchy['categories'].items():
+            if category['enabled']:
+                st.markdown(f"**{category_name}** ({len(category['sublabels'])} sublabels)")
+                for sublabel in category['sublabels']:
+                    st.markdown(f"  └─ {sublabel}")
+                st.markdown("")
+
+    return hierarchy
 
 
-def calculate_label_dimensions(label_structure: Dict, predict_main_labels: bool = True) -> Dict:
+def auto_detect_hierarchy(label_columns: List[str]) -> Dict:
+    """
+    Auto-detect hierarchy from column naming patterns
+
+    Looks for patterns like:
+    - EVENT_Illness, CAUSE_Spirits_Gods, ACTION_Physical_Material
+    - Illness (EVENT), Spirits_Gods (CAUSE), Physical_Material (ACTION)
+    """
+    hierarchy = {'categories': {}}
+
+    # Pattern 1: PREFIX_Sublabel
+    for col in label_columns:
+        if '_' in col:
+            parts = col.split('_', 1)
+            if len(parts) == 2:
+                main, sub = parts
+                main = main.upper()
+
+                if main not in hierarchy['categories']:
+                    hierarchy['categories'][main] = {
+                        'sublabels': [],
+                        'enabled': True
+                    }
+
+                hierarchy['categories'][main]['sublabels'].append(col)
+
+    return hierarchy
+
+
+# ============================================================================
+# LABEL STRUCTURE UTILITIES
+# ============================================================================
+
+def build_label_structure_from_hierarchy(
+    hierarchy_config: Dict,
+    predict_main_labels: bool
+) -> Tuple[Dict, List[str]]:
+    """
+    Build label structure and ordered label list from hierarchy config
+
+    Args:
+        hierarchy_config: User-configured hierarchy
+        predict_main_labels: Whether to include main category labels
+
+    Returns:
+        Tuple of (label_structure, ordered_label_columns)
+    """
+
+    label_structure = {}
+    ordered_labels = []
+
+    # Add main categories first (if enabled)
+    if predict_main_labels:
+        for category_name, category_data in hierarchy_config['categories'].items():
+            if category_data['enabled']:
+                ordered_labels.append(category_name)
+
+    # Add sublabels by category
+    for category_name, category_data in hierarchy_config['categories'].items():
+        if not category_data['enabled']:
+            continue
+
+        label_structure[category_name] = {
+            'main_label': category_name,
+            'sublabels': category_data['sublabels'],
+            'enabled': True
+        }
+
+        ordered_labels.extend(category_data['sublabels'])
+
+    return label_structure, ordered_labels
+
+
+def calculate_label_dimensions(
+    label_structure: Dict,
+    predict_main_labels: bool
+) -> Dict:
     """Calculate the number of labels for each category"""
+
     dims = {
         "num_main_labels": 0,
         "num_event_labels": 0,
@@ -468,24 +443,27 @@ def calculate_label_dimensions(label_structure: Dict, predict_main_labels: bool 
     # Main labels (only if enabled)
     if predict_main_labels:
         for category, info in label_structure.items():
-            if not info.get("enabled", True):
-                continue
-            dims["num_main_labels"] += 1
-            dims["label_indices"][info["main_label"]] = current_idx
-            dims["label_names"].append(info["main_label"])
-            current_idx += 1
+            if info.get("enabled", True):
+                dims["num_main_labels"] += 1
+                dims["label_indices"][info["main_label"]] = current_idx
+                dims["label_names"].append(info["main_label"])
+                current_idx += 1
 
-    # Sublabels
+    # Sublabels - map to EVENT/CAUSE/ACTION for model architecture
     for category, info in label_structure.items():
         if not info.get("enabled", True):
             continue
 
         for sublabel in info["sublabels"]:
-            if category == "EVENT":
+            # Map category to model's expected structure
+            if category == "EVENT" or "event" in category.lower():
                 dims["num_event_labels"] += 1
-            elif category == "CAUSE":
+            elif category == "CAUSE" or "cause" in category.lower():
                 dims["num_cause_labels"] += 1
-            elif category == "ACTION":
+            elif category == "ACTION" or "action" in category.lower():
+                dims["num_action_labels"] += 1
+            else:
+                # Default to action if ambiguous
                 dims["num_action_labels"] += 1
 
             dims["label_indices"][sublabel] = current_idx
@@ -496,29 +474,73 @@ def calculate_label_dimensions(label_structure: Dict, predict_main_labels: bool 
 
     return dims
 
-def prepare_datasets(
-        df: pd.DataFrame,
-        label_columns: List[str],
-        passage_col: str,
-        data_config: Dict,
-        tokenizer
-) -> Tuple[Dataset, Dataset, Dataset]:
-    """Prepare train/val/test datasets"""
 
-    # IMPORTANT: Only keep columns we need to avoid type conversion issues
-    # Keep: passage column, label columns, and optionally ID
+def augment_data_with_main_categories(
+    df: pd.DataFrame,
+    label_structure: Dict,
+    predict_main_labels: bool
+) -> pd.DataFrame:
+    """
+    Add main category columns to dataframe (inferred from sublabels)
+
+    Args:
+        df: DataFrame with sublabel columns
+        label_structure: Hierarchy structure
+        predict_main_labels: Whether to add main categories
+
+    Returns:
+        DataFrame with main category columns added
+    """
+
+    if not predict_main_labels:
+        return df
+
+    df = df.copy()
+
+    # Create main category columns
+    for category_name, category_info in label_structure.items():
+        if not category_info.get('enabled', True):
+            continue
+
+        sublabels = category_info['sublabels']
+
+        # Find which sublabels exist in df
+        existing_sublabels = [col for col in sublabels if col in df.columns]
+
+        if existing_sublabels:
+            # Main category = 1 if ANY sublabel = 1
+            df[category_name] = (df[existing_sublabels].sum(axis=1) > 0).astype(int)
+        else:
+            df[category_name] = 0
+
+    return df
+
+
+# ============================================================================
+# DATASET PREPARATION
+# ============================================================================
+
+def prepare_datasets(
+    df: pd.DataFrame,
+    label_columns: List[str],
+    passage_col: str,
+    data_config: Dict,
+    tokenizer
+) -> Tuple[Dataset, Dataset, Dataset]:
+    """Prepare train/val/test datasets with proper data cleaning"""
+
+    # Only keep necessary columns
     columns_to_keep = [passage_col] + label_columns
 
-    # Add ID if it exists and is useful
+    # Add ID if exists
     if 'ID' in df.columns:
         try:
-            # Try to convert ID to string to avoid type issues
             df['ID'] = df['ID'].astype(str)
             columns_to_keep.append('ID')
         except:
-            pass  # Skip ID if conversion fails
+            pass
 
-    # Filter to only needed columns
+    # Filter to needed columns
     df_clean = df[columns_to_keep].copy()
 
     # Ensure all label columns are numeric (0/1)
@@ -528,12 +550,12 @@ def prepare_datasets(
     # Ensure passage column is string
     df_clean[passage_col] = df_clean[passage_col].astype(str)
 
-    # Remove any rows with NaN in passage column
+    # Remove rows with missing passages
     df_clean = df_clean[df_clean[passage_col].notna()]
 
     print(f"📊 Cleaned dataset: {len(df_clean)} passages with {len(columns_to_keep)} columns")
 
-    # First split: train+val vs test
+    # Split data
     stratify_col = data_config.get("stratify_by")
     stratify_array = df_clean[stratify_col] if stratify_col and stratify_col in df_clean.columns else None
 
@@ -544,7 +566,6 @@ def prepare_datasets(
         stratify=stratify_array
     )
 
-    # Second split: train vs val
     stratify_array = train_val_df[stratify_col] if stratify_col and stratify_col in train_val_df.columns else None
 
     train_df, val_df = train_test_split(
@@ -557,14 +578,12 @@ def prepare_datasets(
     print(f"📊 Split: {len(train_df)} train, {len(val_df)} val, {len(test_df)} test")
 
     # Convert to HuggingFace datasets
-    # Reset index to avoid index-related issues
     train_dataset = Dataset.from_pandas(train_df.reset_index(drop=True))
     val_dataset = Dataset.from_pandas(val_df.reset_index(drop=True))
     test_dataset = Dataset.from_pandas(test_df.reset_index(drop=True))
 
-    # Tokenization function
+    # Tokenization
     def tokenize_function(examples):
-        """Tokenize passages"""
         return tokenizer(
             examples[passage_col],
             padding='max_length',
@@ -572,16 +591,13 @@ def prepare_datasets(
             max_length=data_config["max_length"]
         )
 
-    # Prepare labels function
+    # Prepare labels
     def prepare_labels(examples, label_columns):
-        """Prepare label vectors"""
         labels = []
         batch_size = len(examples[label_columns[0]])
 
         for i in range(batch_size):
-            label_vector = []
-            for col in label_columns:
-                label_vector.append(int(examples[col][i]))
+            label_vector = [int(examples[col][i]) for col in label_columns]
             labels.append(label_vector)
 
         examples['labels'] = labels
@@ -598,15 +614,17 @@ def prepare_datasets(
     val_dataset = val_dataset.map(lambda x: prepare_labels(x, label_columns), batched=True)
     test_dataset = test_dataset.map(lambda x: prepare_labels(x, label_columns), batched=True)
 
-    # Remove unnecessary columns (keep only tokenizer outputs and labels)
+    # Remove unnecessary columns
     columns_to_remove = [passage_col] + label_columns
     if 'ID' in train_dataset.column_names:
         columns_to_remove.append('ID')
 
     train_dataset = train_dataset.remove_columns(
         [col for col in columns_to_remove if col in train_dataset.column_names])
-    val_dataset = val_dataset.remove_columns([col for col in columns_to_remove if col in val_dataset.column_names])
-    test_dataset = test_dataset.remove_columns([col for col in columns_to_remove if col in test_dataset.column_names])
+    val_dataset = val_dataset.remove_columns(
+        [col for col in columns_to_remove if col in val_dataset.column_names])
+    test_dataset = test_dataset.remove_columns(
+        [col for col in columns_to_remove if col in test_dataset.column_names])
 
     # Set format for PyTorch
     train_dataset.set_format('torch')
@@ -616,6 +634,24 @@ def prepare_datasets(
     print("✅ Datasets prepared successfully!")
 
     return train_dataset, val_dataset, test_dataset
+
+
+def calculate_class_weights(df: pd.DataFrame, label_columns: List[str]) -> torch.Tensor:
+    """Calculate class weights for handling imbalance"""
+    class_weights = []
+
+    for col in label_columns:
+        pos_count = df[col].sum()
+        neg_count = len(df) - pos_count
+
+        if pos_count > 0:
+            weight = neg_count / pos_count
+        else:
+            weight = 1.0
+
+        class_weights.append(weight)
+
+    return torch.tensor(class_weights).float()
 
 
 def compute_metrics_for_trainer(label_names):
@@ -647,23 +683,9 @@ def compute_metrics_for_trainer(label_names):
     return compute_metrics
 
 
-def calculate_class_weights(df: pd.DataFrame, label_columns: List[str]) -> torch.Tensor:
-    """Calculate class weights for handling imbalance"""
-    class_weights = []
-
-    for col in label_columns:
-        pos_count = df[col].sum()
-        neg_count = len(df) - pos_count
-
-        if pos_count > 0:
-            weight = neg_count / pos_count
-        else:
-            weight = 1.0
-
-        class_weights.append(weight)
-
-    return torch.tensor(class_weights).float()
-
+# ============================================================================
+# VISUALIZATION
+# ============================================================================
 
 def visualize_training_history(history: List[Dict], output_dir: Path):
     """Create training history visualizations"""
@@ -671,7 +693,6 @@ def visualize_training_history(history: List[Dict], output_dir: Path):
     if not history:
         return None
 
-    # Ensure output directory exists
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -712,7 +733,7 @@ def visualize_training_history(history: List[Dict], output_dir: Path):
     axes[1, 0].set_title('Overfitting Indicator (>1 = overfitting)')
     axes[1, 0].grid(alpha=0.3)
 
-    # Learning rate (if available)
+    # Learning rate
     learning_rates = [h.get('learning_rate', 0) for h in history]
     if any(learning_rates):
         axes[1, 1].plot(epochs, learning_rates, 'brown', linewidth=2)
@@ -726,7 +747,6 @@ def visualize_training_history(history: List[Dict], output_dir: Path):
 
     plt.tight_layout()
 
-    # Save
     save_path = output_dir / 'training_history.png'
     try:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -740,7 +760,6 @@ def visualize_training_history(history: List[Dict], output_dir: Path):
 def visualize_test_results(test_results: Dict, label_names: List[str], output_dir: Path):
     """Create test results visualizations"""
 
-    # Ensure output directory exists
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -772,7 +791,7 @@ def visualize_test_results(test_results: Dict, label_names: List[str], output_di
     # Per-label performance
     ax = axes[1]
 
-    if label_f1s:  # Only plot if we have per-label scores
+    if label_f1s:
         labels = list(label_f1s.keys())
         scores = list(label_f1s.values())
 
@@ -780,19 +799,8 @@ def visualize_test_results(test_results: Dict, label_names: List[str], output_di
         sorted_items = sorted(zip(labels, scores), key=lambda x: x[1])
         labels, scores = zip(*sorted_items) if sorted_items else ([], [])
 
-        # Color based on category
-        colors = []
-        for label in labels:
-            if 'EVENT' in label or label in ['Illness', 'Accident']:
-                colors.append('#FF6B6B')
-            elif 'CAUSE' in label or label in ['Just_Happens', 'Material_Physical', 'Spirits_Gods',
-                                               'Witchcraft_Sorcery', 'Rule_Violation_Taboo']:
-                colors.append('#4ECDC4')
-            elif 'ACTION' in label or label in ['Physical_Material', 'Technical_Specialist', 'Divination',
-                                                'Shaman_Medium_Healer', 'Priest_High_Religion']:
-                colors.append('#45B7D1')
-            else:
-                colors.append('#95A5A6')
+        # Color by score quality
+        colors = ['#27AE60' if s > 0.7 else '#F39C12' if s > 0.5 else '#E74C3C' for s in scores]
 
         y_pos = np.arange(len(labels))
         ax.barh(y_pos, scores, color=colors)
@@ -814,7 +822,6 @@ def visualize_test_results(test_results: Dict, label_names: List[str], output_di
 
     plt.tight_layout()
 
-    # Save
     save_path = output_dir / 'test_results.png'
     try:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -824,65 +831,21 @@ def visualize_test_results(test_results: Dict, label_names: List[str], output_di
 
     return fig
 
+
 # ============================================================================
-# STREAMLIT UI COMPONENTS
+# DEFAULT CONFIGURATION
 # ============================================================================
-
-
-def render_training_page(session_state: Dict):
-    """Render the training page - REFACTORED"""
-
-    st.markdown("## 🎓 Train Model")
-
-    # Get training data (DataObject-aware)
-    try:
-        df, label_columns, passage_col = get_training_data_from_session(session_state)
-    except ValueError as e:
-        st.warning(f"⚠️ {str(e)}")
-        st.info("Go to **Data** page and load a dataset to begin training")
-        return
-
-    # Initialize config
-    if 'training_config' not in session_state:
-        session_state['training_config'] = get_default_training_config()
-
-    # Sanitize config types (handles AI assistant string inputs)
-    session_state['training_config'] = sanitize_config_types(session_state['training_config'])
-
-    # Initialize training state
-    if 'training_active' not in session_state:
-        session_state['training_active'] = False
-
-    # Initialize working data (separate from main data)
-    if 'training_working_data' not in session_state:
-        session_state['training_working_data'] = {
-            'df': df,
-            'label_columns': label_columns,
-            'passage_col': passage_col
-        }
-
-    # Tabs
-    config_tab, monitor_tab, results_tab = st.tabs(["⚙️ Configuration", "📊 Monitor", "📈 Results"])
-
-    with config_tab:
-        render_training_configuration(session_state, df, label_columns, passage_col)
-
-    with monitor_tab:
-        render_training_monitor(session_state)
-
-    with results_tab:
-        render_training_results(session_state)
-
 
 def get_default_training_config() -> Dict:
     """Get default training configuration"""
     return {
         # Model Architecture
         "base_model": "roberta-base",
-        "use_hierarchy": True,
+        "use_hierarchy": False,
         "gated_hierarchy": True,
         "gate_threshold": 0.5,
-        "predict_main_labels": True,
+        "predict_main_labels": False,
+        "hierarchy_config": None,
         "hidden_size": 768,
         "hierarchical_hidden_size": 256,
         "num_hidden_layers": 2,
@@ -911,39 +874,105 @@ def get_default_training_config() -> Dict:
         "random_seed": 42,
         "stratify_by": None,
 
-        # K-Fold Configuration
-        "use_kfold": False,
-        "n_splits": 5,
-
         # Experiment Naming
         "experiment_name": f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
     }
 
 
-def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_columns: List[str], passage_col: str):
-    """Render training configuration UI - REFACTORED"""
+# ============================================================================
+# STREAMLIT UI - MAIN TRAINING PAGE
+# ============================================================================
+
+def render_training_page(session_state: Dict):
+    """Main render function for training page"""
+
+    st.markdown("## 🎓 Train Model")
+
+    # Check if data is loaded
+    if not session_state.get('initialized', False):
+        st.warning("⚠️ Load a dataset first")
+        st.info("Go to the **Data** page and load a dataset to begin training")
+        return
+
+    df = session_state.get('df')
+    label_columns = session_state.get('label_columns', [])
+    passage_col = session_state.get('passage_col', 'Passage')
+
+    # Initialize training config
+    if 'training_config' not in session_state:
+        session_state['training_config'] = get_default_training_config()
+
+    if 'training_active' not in session_state:
+        session_state['training_active'] = False
+
+    # Create tabs
+    config_tab, monitor_tab, results_tab = st.tabs([
+        "⚙️ Configuration",
+        "📊 Monitor",
+        "📈 Results"
+    ])
+
+    with config_tab:
+        render_training_configuration(session_state, df, label_columns, passage_col)
+
+    with monitor_tab:
+        render_training_monitor(session_state)
+
+    with results_tab:
+        render_training_results(session_state)
+
+
+# ============================================================================
+# CONFIGURATION UI
+# ============================================================================
+
+def render_training_configuration(
+    session_state: Dict,
+    df: pd.DataFrame,
+    label_columns: List[str],
+    passage_col: str
+):
+    """Render comprehensive training configuration UI"""
 
     config = session_state['training_config']
 
     st.markdown("### 📋 Training Configuration")
 
+    # Initialize training_df
+    training_df = None
+
     # ========================================================================
-    # 1️⃣ Dataset Selection
+    # SECTION 1: DATASET SELECTION
     # ========================================================================
 
     st.markdown("#### 1️⃣ Dataset Selection")
 
-    working_data = select_training_dataset(session_state, df, label_columns, passage_col)
-    session_state['training_working_data'] = working_data  # ✅ PERSIST CHANGES
+    dataset_source = st.radio(
+        "Data source:",
+        ["Current Dataset", "Browse Experiments", "Browse DataObjects"],
+        horizontal=True
+    )
 
-    training_df = working_data['df']
-    training_labels = working_data['label_columns']
-    training_passage = working_data['passage_col']
+    if dataset_source == "Current Dataset":
+        st.info(f"Using current dataset: {len(df):,} passages")
+        training_df = df
+
+    elif dataset_source == "Browse Experiments":
+        training_df = load_from_experiments(df, label_columns, passage_col)
+
+    elif dataset_source == "Browse DataObjects":
+        st.info("💡 DataObject loading coming soon")
+        training_df = df
+
+    # Fallback
+    if training_df is None:
+        st.warning("⚠️ No training dataset selected. Using full dataset.")
+        training_df = df
 
     st.markdown("---")
 
     # ========================================================================
-    # 2️⃣ Model Architecture
+    # SECTION 2: MODEL ARCHITECTURE
     # ========================================================================
 
     st.markdown("#### 2️⃣ Model Architecture")
@@ -953,69 +982,82 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
     with col1:
         config["base_model"] = st.selectbox(
             "Base model:",
-            ["roberta-base", "bert-base-uncased", "distilbert-base-uncased"],
-            key="train_base_model"
+            ["roberta-base", "bert-base-uncased", "distilbert-base-uncased"]
         )
 
         config["use_hierarchy"] = st.checkbox(
             "Use hierarchical structure",
             value=config["use_hierarchy"],
-            help="Sublabel predictions depend on main category predictions",
-            key="train_use_hier"
+            help="Sublabel predictions depend on main category predictions"
         )
-
-        if config["use_hierarchy"]:
-            config["gated_hierarchy"] = st.checkbox(
-                "Enable gating",
-                value=config["gated_hierarchy"],
-                help="Zero out sublabel predictions if main category not predicted",
-                key="train_gated"
-            )
-
-            if config["gated_hierarchy"]:
-                config["gate_threshold"] = st.slider(
-                    "Gate threshold:",
-                    0.0, 1.0, float(config["gate_threshold"]), 0.05,
-                    key="train_gate_thresh"
-                )
 
     with col2:
-        config["predict_main_labels"] = st.checkbox(
-            "Predict main labels",
-            value=config["predict_main_labels"],
-            help="Predict EVENT, CAUSE, ACTION in addition to sublabels",
-            key="train_predict_main"
-        )
-
         config["num_hidden_layers"] = st.number_input(
             "Hidden layers:",
-            1, 5, int(config["num_hidden_layers"]),
-            key="train_num_layers"
+            1, 5, config["num_hidden_layers"]
         )
 
         config["hierarchical_hidden_size"] = st.number_input(
             "Hidden size:",
-            128, 1024, int(config["hierarchical_hidden_size"]), step=64,
-            key="train_hidden_size"
+            128, 1024, config["hierarchical_hidden_size"], step=64
         )
 
     with col3:
         config["dropout"] = st.slider(
             "Dropout:",
-            0.0, 0.5, float(config["dropout"]), 0.05,
-            key="train_dropout"
+            0.0, 0.5, config["dropout"], 0.05
         )
 
         config["attention_dropout"] = st.slider(
             "Attention dropout:",
-            0.0, 0.5, float(config["attention_dropout"]), 0.05,
-            key="train_attn_dropout"
+            0.0, 0.5, config["attention_dropout"], 0.05
         )
+
+    # Hierarchy configuration (only if hierarchical)
+    if config["use_hierarchy"]:
+        st.markdown("---")
+
+        # Predict main labels option
+        config["predict_main_labels"] = st.checkbox(
+            "Predict main category labels",
+            value=config.get("predict_main_labels", False),
+            help="Add synthetic main category labels (inferred from sublabels) for the model to predict"
+        )
+
+        # Hierarchy builder - now manages its own session state
+        hierarchy_config = render_hierarchy_configuration(
+            label_columns,
+            session_state,
+            config_key='training_hierarchy_config'  # Unique key for training hierarchy
+        )
+
+        # Save back to config
+        config["hierarchy_config"] = hierarchy_config
+
+        # Gating options
+        st.markdown("**Gating Options:**")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            config["gated_hierarchy"] = st.checkbox(
+                "Enable gating",
+                value=config["gated_hierarchy"],
+                help="Zero out sublabel predictions if main category confidence is below threshold"
+            )
+
+        with col2:
+            if config["gated_hierarchy"]:
+                config["gate_threshold"] = st.slider(
+                    "Gate threshold:",
+                    0.0, 1.0, config["gate_threshold"], 0.05,
+                    help="Minimum main category confidence to allow sublabel predictions"
+                )
 
     st.markdown("---")
 
     # ========================================================================
-    # 3️⃣ Loss Configuration
+    # SECTION 3: LOSS CONFIGURATION
     # ========================================================================
 
     st.markdown("#### 3️⃣ Loss Configuration")
@@ -1026,39 +1068,35 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
         config["use_focal_loss"] = st.checkbox(
             "Use focal loss",
             value=config["use_focal_loss"],
-            help="Helps with class imbalance by focusing on hard examples",
-            key="train_focal"
+            help="Helps with class imbalance by focusing on hard examples"
         )
 
         if config["use_focal_loss"]:
             config["focal_gamma"] = st.slider(
                 "Focal gamma:",
-                0.0, 5.0, float(config["focal_gamma"]), 0.5,
-                help="Higher = more focus on hard examples",
-                key="train_focal_gamma"
+                0.0, 5.0, config["focal_gamma"], 0.5,
+                help="Higher = more focus on hard examples"
             )
 
     with col2:
         config["use_weighted_loss"] = st.checkbox(
             "Use weighted loss",
             value=config["use_weighted_loss"],
-            help="Weight loss by inverse class frequency",
-            key="train_weighted"
+            help="Weight loss by inverse class frequency"
         )
 
     with col3:
         if config["use_hierarchy"]:
             config["teacher_forcing_ratio"] = st.slider(
                 "Teacher forcing:",
-                0.0, 1.0, float(config["teacher_forcing_ratio"]), 0.1,
-                help="Use ground truth main labels during training",
-                key="train_teacher"
+                0.0, 1.0, config["teacher_forcing_ratio"], 0.1,
+                help="Probability of using ground truth main labels during training"
             )
 
     st.markdown("---")
 
     # ========================================================================
-    # 4️⃣ Training Parameters
+    # SECTION 4: TRAINING PARAMETERS
     # ========================================================================
 
     st.markdown("#### 4️⃣ Training Parameters")
@@ -1068,60 +1106,52 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
     with col1:
         config["num_epochs"] = st.number_input(
             "Epochs:",
-            1, 50, int(config["num_epochs"]),
-            key="train_epochs"
+            1, 50, config["num_epochs"]
         )
 
         config["batch_size"] = st.number_input(
             "Batch size:",
-            4, 64, int(config["batch_size"]),
-            key="train_batch"
+            4, 64, config["batch_size"]
         )
 
     with col2:
         config["learning_rate"] = st.number_input(
             "Learning rate:",
-            1e-6, 1e-3, float(config["learning_rate"]),
-            format="%.2e",
-            key="train_lr"
+            1e-6, 1e-3, config["learning_rate"],
+            format="%.2e"
         )
 
         config["warmup_steps"] = st.number_input(
             "Warmup steps:",
-            0, 2000, int(config["warmup_steps"]), step=100,
-            key="train_warmup"
+            0, 2000, config["warmup_steps"], step=100
         )
 
     with col3:
         config["weight_decay"] = st.slider(
             "Weight decay:",
-            0.0, 0.1, float(config["weight_decay"]), 0.01,
-            key="train_wd"
+            0.0, 0.1, config["weight_decay"], 0.01
         )
 
         config["gradient_accumulation_steps"] = st.number_input(
             "Gradient accum:",
-            1, 8, int(config["gradient_accumulation_steps"]),
-            key="train_grad_accum"
+            1, 8, config["gradient_accumulation_steps"]
         )
 
     with col4:
         config["max_length"] = st.number_input(
             "Max length:",
-            128, 1024, int(config["max_length"]), step=64,
-            key="train_max_len"
+            128, 1024, config["max_length"], step=64
         )
 
         config["label_smoothing"] = st.slider(
             "Label smoothing:",
-            0.0, 0.2, float(config["label_smoothing"]), 0.01,
-            key="train_smooth"
+            0.0, 0.2, config["label_smoothing"], 0.01
         )
 
     st.markdown("---")
 
     # ========================================================================
-    # 5️⃣ Data Split Configuration
+    # SECTION 5: DATA SPLIT
     # ========================================================================
 
     st.markdown("#### 5️⃣ Data Split")
@@ -1129,77 +1159,81 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
     col1, col2 = st.columns(2)
 
     with col1:
-        config["use_kfold"] = st.checkbox(
-            "Use K-fold cross-validation",
-            value=config["use_kfold"],
-            key="train_kfold"
+        config["test_size"] = st.slider(
+            "Test size:",
+            0.1, 0.3, config["test_size"], 0.05
         )
 
-        if config["use_kfold"]:
-            config["n_splits"] = st.number_input(
-                "Number of folds:",
-                2, 10, int(config["n_splits"]),
-                key="train_folds"
-            )
-        else:
-            config["test_size"] = st.slider(
-                "Test size:",
-                0.1, 0.3, float(config["test_size"]), 0.05,
-                key="train_test_size"
-            )
-
-            config["validation_size"] = st.slider(
-                "Validation size:",
-                0.05, 0.2, float(config["validation_size"]), 0.05,
-                key="train_val_size"
-            )
+        config["validation_size"] = st.slider(
+            "Validation size:",
+            0.05, 0.2, config["validation_size"], 0.05
+        )
 
     with col2:
         config["random_seed"] = st.number_input(
             "Random seed:",
-            0, 9999, int(config["random_seed"]),
-            key="train_seed"
+            0, 9999, config["random_seed"]
         )
 
-        stratify_options = ["None"] + training_labels
+        stratify_options = ["None"] + label_columns
         stratify_selection = st.selectbox(
             "Stratify by:",
             stratify_options,
-            index=0,
-            key="train_stratify"
+            index=0
         )
         config["stratify_by"] = None if stratify_selection == "None" else stratify_selection
 
     st.markdown("---")
 
     # ========================================================================
-    # 6️⃣ Experiment Info
+    # SECTION 6: EXPERIMENT INFO
     # ========================================================================
 
     st.markdown("#### 6️⃣ Experiment Info")
 
     config["experiment_name"] = st.text_input(
         "Experiment name:",
-        value=config["experiment_name"],
-        key="train_exp_name"
+        value=config["experiment_name"]
     )
 
-    # Save configuration
+    # Save to session
     session_state['training_config'] = config
+    session_state['training_df'] = training_df
 
     st.markdown("---")
 
     # ========================================================================
-    # Training Summary
+    # TRAINING SUMMARY
     # ========================================================================
 
     st.markdown("### 📊 Training Summary")
+
+    # Calculate label info based on configuration
+    if config["use_hierarchy"] and config.get("hierarchy_config"):
+        hierarchy = config["hierarchy_config"]
+
+        # Count labels
+        num_main = 0
+        num_sublabels = 0
+
+        for cat_name, cat_data in hierarchy['categories'].items():
+            if cat_data['enabled']:
+                if config["predict_main_labels"]:
+                    num_main += 1
+                num_sublabels += len(cat_data['sublabels'])
+
+        total_labels = num_main + num_sublabels
+        label_breakdown = f"{num_main} main + {num_sublabels} sub" if num_main > 0 else f"{num_sublabels} sublabels only"
+    else:
+        total_labels = len(label_columns)
+        label_breakdown = f"{total_labels} flat"
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
         st.metric("Training Passages", f"{len(training_df):,}")
-        st.metric("Labels", len(training_labels))
+        st.metric("Total Labels", total_labels)
+        st.caption(label_breakdown)
 
     with col2:
         # Estimate training time
@@ -1209,34 +1243,130 @@ def render_training_configuration(session_state: Dict, df: pd.DataFrame, label_c
         est_minutes = est_seconds / 60
 
         st.metric("Est. Time", f"{est_minutes:.1f} min")
-        st.metric("Total Batches", total_batches)
+        st.metric("Total Batches", f"{total_batches:,}")
 
     with col3:
         st.metric("Epochs", config["num_epochs"])
         st.metric("Batch Size", config["batch_size"])
 
-    # ========================================================================
-    # Start Training Button
-    # ========================================================================
-
     st.markdown("---")
 
+    # ========================================================================
+    # START TRAINING BUTTON
+    # ========================================================================
+
     if not session_state.get('training_active', False):
-        if st.button("🚀 Start Training", type="primary", key="start_training_btn"):
-            # Use working data from session state
-            working = session_state['training_working_data']
-            start_training(
-                session_state,
-                working['df'],
-                working['label_columns'],
-                working['passage_col']
-            )
+        if st.button("🚀 Start Training", type="primary", use_container_width=True):
+            start_training(session_state, training_df, label_columns, passage_col)
     else:
         st.warning("⚠️ Training in progress...")
         if st.button("🛑 Stop Training", type="secondary"):
             session_state['training_active'] = False
             st.rerun()
 
+
+def load_from_experiments(
+    df: pd.DataFrame,
+    label_columns: List[str],
+    passage_col: str
+) -> pd.DataFrame:
+    """Load dataset from saved experiments"""
+
+    experiment = DataExperiment()
+    experiments = experiment.list_experiments()
+
+    if not experiments:
+        st.warning("No experiments found. Create experiments in Data Prep page.")
+        return df
+
+    # Filter options
+    exp_names = [exp['name'] for exp in experiments]
+    selected_exp_name = st.selectbox(
+        "Select experiment:",
+        exp_names,
+        key="exp_selector"
+    )
+
+    selected_exp = next((exp for exp in experiments if exp['name'] == selected_exp_name), None)
+
+    if not selected_exp:
+        st.error("Could not load selected experiment")
+        return df
+
+    meta = selected_exp['metadata']
+
+    # Show experiment info
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if 'statistics' in meta:
+            st.metric("Passages", meta['statistics']['num_passages'])
+        elif 'tiers' in meta:
+            total_passages = sum(
+                tier_data.get('count', 0)
+                for tier_data in meta['tiers'].values()
+            )
+            st.metric("Passages", total_passages)
+        else:
+            st.metric("Passages", "N/A")
+
+    with col2:
+        if 'statistics' in meta:
+            st.metric("Labels", len(meta['statistics']['label_columns']))
+        elif 'label_columns' in meta:
+            st.metric("Labels", len(meta['label_columns']))
+        else:
+            st.metric("Labels", "N/A")
+
+    with col3:
+        exp_type = meta.get('experiment_type', 'unknown')
+        st.metric("Type", exp_type)
+
+    # Load the experiment
+    try:
+        if exp_type == 'tiered_training':
+            st.markdown("**Select tier(s) to train on:**")
+            tier_choice = st.radio(
+                "Training data:",
+                ["Tier 1 Only", "Tier 1 + Tier 2 Combined"],
+                horizontal=True,
+                key="tier_choice_exp"
+            )
+
+            if "Tier 1 Only" in tier_choice:
+                data_file = selected_exp['directory'] / "tier1.xlsx"
+                training_df = pd.read_excel(data_file)
+                st.info(f"Using Tier 1: {len(training_df):,} passages")
+            else:
+                data_file = selected_exp['directory'] / "tier1_tier2_combined.xlsx"
+                training_df = pd.read_excel(data_file)
+                st.info(f"Using Combined: {len(training_df):,} passages")
+
+            # Update label columns from metadata
+            if 'label_columns' in meta:
+                label_columns = meta['label_columns']
+
+        else:
+            # Single dataset experiment
+            data_file = selected_exp['directory'] / "data.xlsx"
+            training_df = pd.read_excel(data_file)
+            st.info(f"Using experiment data: {len(training_df):,} passages")
+
+            # Update label columns from metadata
+            if 'statistics' in meta:
+                label_columns = meta['statistics']['label_columns']
+            elif 'label_columns' in meta:
+                label_columns = meta['label_columns']
+
+        return training_df
+
+    except Exception as e:
+        st.error(f"Error loading experiment: {e}")
+        return df
+
+
+# ============================================================================
+# MONITORING UI
+# ============================================================================
 
 def render_training_monitor(session_state: Dict):
     """Render training monitoring UI"""
@@ -1251,7 +1381,6 @@ def render_training_monitor(session_state: Dict):
     if session_state.get('training_active'):
         st.success("✅ Training in progress...")
 
-        # Progress bar
         current_epoch = session_state.get('current_epoch', 0)
         total_epochs = session_state['training_config']['num_epochs']
 
@@ -1282,9 +1411,14 @@ def render_training_monitor(session_state: Dict):
 
         if len(history) > 1:
             fig = visualize_training_history(history, Path("./temp"))
-            st.pyplot(fig)
-            plt.close()
+            if fig:
+                st.pyplot(fig)
+                plt.close()
 
+
+# ============================================================================
+# RESULTS UI
+# ============================================================================
 
 def render_training_results(session_state: Dict):
     """Render training results UI"""
@@ -1318,7 +1452,6 @@ def render_training_results(session_state: Dict):
             )
 
         with col3:
-            # Count high-performing labels
             high_perf = sum(1 for k, v in test_results.items()
                             if k.startswith('eval_f1_') and v > 0.7)
             st.metric("Labels > 0.7", high_perf)
@@ -1326,10 +1459,11 @@ def render_training_results(session_state: Dict):
         # Visualizations
         st.markdown("#### Performance Breakdown")
 
-        label_names = session_state.get('label_columns', [])
+        label_names = session_state.get('final_label_list', [])
         fig = visualize_test_results(test_results, label_names, Path("./temp"))
-        st.pyplot(fig)
-        plt.close()
+        if fig:
+            st.pyplot(fig)
+            plt.close()
 
         # Per-label results table
         st.markdown("#### Per-Label Results")
@@ -1347,7 +1481,7 @@ def render_training_results(session_state: Dict):
         st.dataframe(
             pd.DataFrame(label_results),
             hide_index=True,
-            width='stretch'
+            use_container_width=True
         )
 
     # Model info
@@ -1362,13 +1496,13 @@ def render_training_results(session_state: Dict):
 
         with col1:
             if st.button("📂 Load Model for Inference"):
-                # Load the trained model
                 loader = HRAFModelLoader()
                 success = loader.load_model(str(output_dir / "final_model"))
 
                 if success:
-                    # Add to loaded models
                     model_name = session_state['training_config']['experiment_name']
+                    if 'loaded_models' not in session_state:
+                        session_state['loaded_models'] = {}
                     session_state['loaded_models'][model_name] = loader
                     st.success(f"✅ Model loaded as '{model_name}'")
                     st.info("Go to Model Inference page to test predictions")
@@ -1391,66 +1525,17 @@ Files:
                 """)
 
 
-def augment_labels_with_main_categories(
-        df: pd.DataFrame,
-        label_columns: List[str],
-        predict_main_labels: bool
-) -> Tuple[pd.DataFrame, List[str]]:
-    """
-    Add synthetic main category labels if predict_main_labels=True
+# ============================================================================
+# TRAINING EXECUTION
+# ============================================================================
 
-    Main categories are inferred from sublabels:
-    - EVENT = 1 if any of [Illness, Accident, Other] = 1
-    - CAUSE = 1 if any of [Just_Happens, Material_Physical, etc.] = 1
-    - ACTION = 1 if any of [Physical_Material, Technical_Specialist, etc.] = 1
-
-    Args:
-        df: DataFrame with sublabel columns
-        label_columns: List of sublabel column names
-        predict_main_labels: Whether to add main category labels
-
-    Returns:
-        Tuple of (augmented_df, augmented_label_columns)
-    """
-    if not predict_main_labels:
-        return df, label_columns
-
-    df = df.copy()
-
-    # Define sublabel mappings
-    event_sublabels = ['Illness', 'Accident', 'Other']
-    cause_sublabels = ['Material_Physical', 'Spirits_Gods',
-                       'Witchcraft_Sorcery', 'Rule_Violation_Taboo']
-    action_sublabels = ['Physical_Material', 'Technical_Specialist', 'Divination',
-                        'Shaman_Medium_Healer', 'Priest_High_Religion']
-
-    # Create main category columns (inferred from sublabels)
-    event_cols = [col for col in label_columns if col in event_sublabels]
-    if event_cols:
-        df['EVENT'] = (df[event_cols].sum(axis=1) > 0).astype(int)
-    else:
-        df['EVENT'] = 0
-
-    cause_cols = [col for col in label_columns if col in cause_sublabels]
-    if cause_cols:
-        df['CAUSE'] = (df[cause_cols].sum(axis=1) > 0).astype(int)
-    else:
-        df['CAUSE'] = 0
-
-    action_cols = [col for col in label_columns if col in action_sublabels]
-    if action_cols:
-        df['ACTION'] = (df[action_cols].sum(axis=1) > 0).astype(int)
-    else:
-        df['ACTION'] = 0
-
-    # Prepend main categories to label_columns
-    main_labels = ['EVENT', 'CAUSE', 'ACTION']
-    augmented_label_columns = main_labels + label_columns
-
-    return df, augmented_label_columns
-
-def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns: List[str], passage_col: str):
-    """Start the training process"""
+def start_training(
+    session_state: Dict,
+    training_df: pd.DataFrame,
+    label_columns: List[str],
+    passage_col: str
+):
+    """Execute the training process"""
 
     config = session_state['training_config']
 
@@ -1466,11 +1551,10 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         return
 
     missing_labels = [label for label in label_columns if label not in training_df.columns]
-    if missing_labels:
+    if missing_labels and not config["use_hierarchy"]:
         st.error(f"❌ Missing label columns: {missing_labels}")
         return
 
-    # Check for valid passages
     valid_passages = training_df[passage_col].notna().sum()
     if valid_passages == 0:
         st.error("❌ No valid passages found!")
@@ -1479,56 +1563,64 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
     if valid_passages < len(training_df):
         st.warning(f"⚠️ {len(training_df) - valid_passages} passages have missing text and will be removed")
 
-    st.success(f"✅ Validated: {valid_passages} passages, {len(label_columns)} labels")
+    st.success(f"✅ Validated: {valid_passages} passages")
 
     # Create output directory
     output_dir = Path(f"./models/{config['experiment_name']}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # AUGMENT LABELS WITH MAIN CATEGORIES IF NEEDED
-    st.info("📋 Preparing label structure...")
-    training_df, augmented_label_columns = augment_labels_with_main_categories(
-        training_df,
-        label_columns,
-        config["predict_main_labels"]
-    )
+    # Build label structure
+    if config["use_hierarchy"] and config.get("hierarchy_config"):
+        st.info("📋 Building hierarchical label structure...")
 
-    if config["predict_main_labels"]:
-        st.success(f"✅ Added main category labels: EVENT, CAUSE, ACTION")
-        st.info(f"📊 Total labels for training: {len(augmented_label_columns)} (3 main + {len(label_columns)} sub)")
+        hierarchy = config["hierarchy_config"]
+        label_structure, ordered_labels = build_label_structure_from_hierarchy(
+            hierarchy,
+            config["predict_main_labels"]
+        )
+
+        # Augment data with main categories if needed
+        training_df = augment_data_with_main_categories(
+            training_df,
+            label_structure,
+            config["predict_main_labels"]
+        )
+
+        # Use ordered labels for training
+        final_label_list = ordered_labels
+
+        st.success(f"✅ Hierarchical structure: {len(label_structure)} categories, {len(final_label_list)} total labels")
+
+        if config["predict_main_labels"]:
+            num_main = sum(1 for cat in label_structure.values() if cat['enabled'])
+            num_sub = len(final_label_list) - num_main
+            st.info(f"📊 Training with: {num_main} main labels + {num_sub} sublabels")
+        else:
+            st.info(f"📊 Training with: {len(final_label_list)} sublabels only (hierarchy for structure)")
     else:
-        st.info(f"📊 Training with {len(augmented_label_columns)} sublabels only")
+        st.info("📋 Using flat label structure...")
+
+        # Flat structure - just use original labels
+        final_label_list = label_columns
+
+        # Create simple structure for model
+        label_structure = {
+            'FLAT': {
+                'main_label': 'FLAT',
+                'sublabels': label_columns,
+                'enabled': True
+            }
+        }
+
+        st.success(f"✅ Flat structure: {len(final_label_list)} labels")
+
+    # Save final label list for results display
+    session_state['final_label_list'] = final_label_list
 
     # Calculate label dimensions
-    label_structure = {
-        "EVENT": {
-            "main_label": "EVENT",
-            "sublabels": [l for l in label_columns if l in ['Illness', 'Accident', 'Other']],
-            "enabled": True
-        },
-        "CAUSE": {
-            "main_label": "CAUSE",
-            "sublabels": [l for l in label_columns if
-                          l in ['Just_Happens', 'Material_Physical', 'Spirits_Gods',
-                                'Witchcraft_Sorcery', 'Rule_Violation_Taboo', 'Other.1']],
-            "enabled": True
-        },
-        "ACTION": {
-            "main_label": "ACTION",
-            "sublabels": [l for l in label_columns if
-                          l in ['Physical_Material', 'Technical_Specialist', 'Divination',
-                                'Shaman_Medium_Healer', 'Priest_High_Religion', 'Other.2']],
-            "enabled": True
-        }
-    }
-
     label_dims = calculate_label_dimensions(label_structure, config["predict_main_labels"])
 
-    st.info(f"🏗️ Model will predict {label_dims['total_labels']} labels: "
-            f"{label_dims['num_main_labels']} main + "
-            f"{label_dims['num_event_labels']} EVENT + "
-            f"{label_dims['num_cause_labels']} CAUSE + "
-            f"{label_dims['num_action_labels']} ACTION")
+    st.info(f"🏗️ Model architecture: {label_dims['total_labels']} total labels")
 
     # Initialize training session
     training_session = TrainingSession(config, str(output_dir))
@@ -1537,11 +1629,11 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         model_info = training_session.initialize_model(label_dims)
         st.success(f"✅ Model initialized: {model_info['trainable_params']:,} trainable parameters")
 
-    # Prepare datasets - USE AUGMENTED COLUMNS
+    # Prepare datasets
     with st.spinner("Preparing datasets..."):
         train_dataset, val_dataset, test_dataset = prepare_datasets(
             training_df,
-            augmented_label_columns,  # USE AUGMENTED
+            final_label_list,
             passage_col,
             {
                 "test_size": config["test_size"],
@@ -1553,14 +1645,14 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
             training_session.tokenizer
         )
 
-        st.success(f"✅ Datasets prepared: {len(train_dataset)} train, {len(val_dataset)} val, {len(test_dataset)} test")
+        st.success(f"✅ Datasets: {len(train_dataset)} train, {len(val_dataset)} val, {len(test_dataset)} test")
 
-    # Calculate class weights - USE AUGMENTED COLUMNS
+    # Calculate class weights
     class_weights = None
     if config["use_weighted_loss"]:
         with st.spinner("Calculating class weights..."):
-            class_weights = calculate_class_weights(training_df, augmented_label_columns)
-            st.info(f"📊 Using weighted loss for {len(augmented_label_columns)} labels")
+            class_weights = calculate_class_weights(training_df, final_label_list)
+            st.info(f"📊 Using weighted loss for {len(final_label_list)} labels")
 
     # Training arguments
     training_args = TrainingArguments(
@@ -1586,7 +1678,7 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         remove_unused_columns=False,
     )
 
-    # Initialize trainer - USE AUGMENTED COLUMNS
+    # Initialize trainer
     trainer = HierarchicalTrainer(
         model=training_session.model,
         args=training_args,
@@ -1594,9 +1686,9 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         eval_dataset=val_dataset,
         tokenizer=training_session.tokenizer,
         data_collator=DataCollatorWithPadding(training_session.tokenizer),
-        compute_metrics=compute_metrics_for_trainer(augmented_label_columns),  # USE AUGMENTED
+        compute_metrics=compute_metrics_for_trainer(final_label_list),
         class_weights=class_weights,
-        teacher_forcing_ratio=config["teacher_forcing_ratio"],
+        teacher_forcing_ratio=config.get("teacher_forcing_ratio", 0.5),
     )
 
     # Train
@@ -1607,22 +1699,15 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
     st.info("🎓 Training started...")
 
     try:
-        # Create progress placeholder
         progress_placeholder = st.empty()
         status_placeholder = st.empty()
 
         with st.spinner("Training in progress..."):
-            # Train the model
             train_result = trainer.train()
-
             status_placeholder.success("✅ Training completed!")
 
         # Get training history
-        history = []
-        for log in trainer.state.log_history:
-            if 'epoch' in log:
-                history.append(log)
-
+        history = [log for log in trainer.state.log_history if 'epoch' in log]
         session_state['training_history'] = history
         session_state['current_epoch'] = config["num_epochs"]
 
@@ -1631,7 +1716,6 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         test_results = trainer.evaluate(eval_dataset=test_dataset)
         session_state['test_results'] = test_results
 
-        # Display test results
         st.success(f"✅ Test F1 Micro: {test_results.get('eval_f1_micro', 0):.3f}")
         st.success(f"✅ Test F1 Macro: {test_results.get('eval_f1_macro', 0):.3f}")
 
@@ -1641,14 +1725,13 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
         training_session.model.save_pretrained(final_model_path)
         training_session.tokenizer.save_pretrained(final_model_path)
 
-        # Save training info with augmented label information
+        # Save training info
         training_info = {
             'config': config,
             'test_results': {k: float(v) if isinstance(v, (np.float32, np.float64)) else v
                              for k, v in test_results.items()},
             'label_structure': label_structure,
-            'label_columns': augmented_label_columns,  # Save augmented columns
-            'original_label_columns': label_columns,  # Keep original for reference
+            'label_columns': final_label_list,
             'model_info': model_info,
             'training_completed': datetime.now().isoformat(),
             'dataset_size': {
@@ -1674,13 +1757,13 @@ def start_training(session_state: Dict, training_df: pd.DataFrame, label_columns
             st.warning(f"⚠️ Could not create training history plot: {e}")
 
         try:
-            results_fig = visualize_test_results(test_results, augmented_label_columns, output_dir)
+            results_fig = visualize_test_results(test_results, final_label_list, output_dir)
             if results_fig:
                 st.success("✅ Test results plot saved")
         except Exception as e:
             st.warning(f"⚠️ Could not create test results plot: {e}")
 
-        # Save experiment info to parent directory
+        # Save experiment info
         experiment_info = {
             'experiment_name': config['experiment_name'],
             'created_at': datetime.now().isoformat(),

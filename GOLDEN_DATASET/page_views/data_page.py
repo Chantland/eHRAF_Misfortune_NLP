@@ -1118,7 +1118,7 @@ def render_scored_actions(obj: DataObject):
 
     st.markdown("### 🎯 Create Training Tiers")
 
-    st.info("Create quality-stratified training sets")
+    st.info("Create quality-stratified training sets with optional label targeting")
 
     # Show score distribution
     with st.expander("📊 Score Distribution", expanded=True):
@@ -1136,7 +1136,23 @@ def render_scored_actions(obj: DataObject):
 
     st.markdown("---")
 
-    # Simple tier creation
+    # Configuration method
+    config_method = st.radio(
+        "Configuration method:",
+        ["Quick Presets", "Advanced + Label Targeting"],
+        horizontal=True,
+        key="tier_config_method"
+    )
+
+    if config_method == "Quick Presets":
+        render_quick_tier_presets(obj)
+    else:
+        render_advanced_tier_config(obj)
+
+
+def render_quick_tier_presets(obj: DataObject):
+    """Simple preset-based tier creation"""
+
     st.markdown("#### Quick Tier Creation")
 
     preset = st.selectbox(
@@ -1167,20 +1183,303 @@ def render_scored_actions(obj: DataObject):
                 tier1_config, tier2_config
             )
 
-            pipeline = st.session_state.pipeline
-            tiered_obj = pipeline.create_tiered(
-                name=tiered_name,
-                parent_obj=obj,
-                tier1_df=tier1,
-                tier2_df=tier2,
-                inference_df=inference,
-                tier_config=metadata
+            save_tiered_object(obj, tiered_name, tier1, tier2, inference, metadata)
+
+
+def render_advanced_tier_config(obj: DataObject):
+    """Advanced configuration with label targeting"""
+
+    st.markdown("#### Advanced Configuration")
+
+    # Analyze label distribution
+    label_stats = []
+    for label in obj.label_columns:
+        count = int((obj.df[label] == 1).sum())
+        pct = (count / len(obj.df)) * 100
+        label_stats.append({
+            'label': label,
+            'count': count,
+            'percentage': pct,
+            'is_rare': pct < 10
+        })
+
+    label_stats_df = pd.DataFrame(label_stats).sort_values('percentage')
+
+    # Show distribution
+    with st.expander("📊 Label Distribution Analysis", expanded=True):
+        st.dataframe(
+            label_stats_df.assign(
+                Percentage=label_stats_df['percentage'].apply(lambda x: f"{x:.1f}%"),
+                Rare=label_stats_df['is_rare'].apply(lambda x: "⚠️ Rare" if x else "✓")
+            )[['label', 'count', 'Percentage', 'Rare']],
+            hide_index=True,
+            width='stretch'
+        )
+
+    st.markdown("---")
+
+    # Tier size targets
+    st.markdown("##### Tier Sizes")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        tier1_size = st.number_input(
+            "Tier 1 target size:",
+            min_value=50,
+            max_value=len(obj.df),
+            value=int(len(obj.df) * 0.12),
+            step=50,
+            key="tier1_size"
+        )
+
+        tier1_min_cons = st.slider(
+            "Tier 1 min consistency:",
+            0.0, 1.0, 0.65, 0.05,
+            key="tier1_cons"
+        )
+
+        tier1_min_rerank = st.slider(
+            "Tier 1 min rerank:",
+            0.0, 1.0, 0.45, 0.05,
+            key="tier1_rerank"
+        )
+
+    with col2:
+        tier2_size = st.number_input(
+            "Tier 2 target size:",
+            min_value=50,
+            max_value=len(obj.df),
+            value=int(len(obj.df) * 0.25),
+            step=50,
+            key="tier2_size"
+        )
+
+        tier2_min_cons = st.slider(
+            "Tier 2 min consistency:",
+            0.0, 1.0, 0.45, 0.05,
+            key="tier2_cons"
+        )
+
+        tier2_min_rerank = st.slider(
+            "Tier 2 min rerank:",
+            0.0, 1.0, 0.30, 0.05,
+            key="tier2_rerank"
+        )
+
+    st.markdown("---")
+
+    # Label targeting
+    st.markdown("##### 🎯 Label Targeting (Optional)")
+
+    st.info("""
+    💡 **Label Targeting** ensures rare or important labels are well-represented in your training tiers.
+
+    Without targeting, tiers are selected purely by quality scores. With targeting, the system will 
+    prioritize including passages with specific labels up to your target counts.
+    """)
+
+    use_targeting = st.checkbox(
+        "Enable label targeting",
+        value=False,
+        help="Prioritize specific labels to ensure representation"
+    )
+
+    label_targets = None
+
+    if use_targeting:
+        st.markdown("**Set target counts for specific labels:**")
+
+        # Quick actions
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            if st.button("🎯 Target All Rare Labels (<10%)", key="target_rare"):
+                st.session_state['label_targeting_mode'] = 'rare'
+                st.rerun()
+
+        with col2:
+            if st.button("🎯 Custom Selection", key="target_custom"):
+                st.session_state['label_targeting_mode'] = 'custom'
+                st.rerun()
+
+        with col3:
+            if st.button("🗑️ Clear Targets", key="clear_targets"):
+                st.session_state['label_targeting_mode'] = None
+                st.session_state['tier1_targets'] = {}
+                st.session_state['tier2_targets'] = {}
+                st.rerun()
+
+        # Initialize targeting dictionaries
+        if 'tier1_targets' not in st.session_state:
+            st.session_state['tier1_targets'] = {}
+        if 'tier2_targets' not in st.session_state:
+            st.session_state['tier2_targets'] = {}
+
+        # Auto-populate rare labels if mode is 'rare'
+        if st.session_state.get('label_targeting_mode') == 'rare':
+            rare_labels = [stat['label'] for stat in label_stats if stat['is_rare']]
+
+            for label in rare_labels:
+                count = next(s['count'] for s in label_stats if s['label'] == label)
+                # Target: include most of the rare label passages
+                st.session_state['tier1_targets'][label] = min(count, int(tier1_size * 0.3))
+                st.session_state['tier2_targets'][label] = min(count, int(tier2_size * 0.3))
+
+        # Display targeting UI
+        st.markdown("**Tier 1 Targets:**")
+
+        tier1_cols = st.columns(2)
+        for i, stat in enumerate(label_stats_df.to_dict('records')):
+            with tier1_cols[i % 2]:
+                label = stat['label']
+                count = stat['count']
+
+                # Show current count
+                current_target = st.session_state['tier1_targets'].get(label, 0)
+
+                new_target = st.number_input(
+                    f"{label} ({count} available)",
+                    min_value=0,
+                    max_value=count,
+                    value=current_target,
+                    step=5,
+                    key=f"tier1_target_{label}",
+                    help=f"{stat['percentage']:.1f}% of dataset"
+                )
+
+                if new_target > 0:
+                    st.session_state['tier1_targets'][label] = new_target
+                elif label in st.session_state['tier1_targets']:
+                    del st.session_state['tier1_targets'][label]
+
+        st.markdown("**Tier 2 Targets:**")
+
+        tier2_cols = st.columns(2)
+        for i, stat in enumerate(label_stats_df.to_dict('records')):
+            with tier2_cols[i % 2]:
+                label = stat['label']
+                count = stat['count']
+
+                current_target = st.session_state['tier2_targets'].get(label, 0)
+
+                new_target = st.number_input(
+                    f"{label} ({count} available)",
+                    min_value=0,
+                    max_value=count,
+                    value=current_target,
+                    step=5,
+                    key=f"tier2_target_{label}",
+                    help=f"{stat['percentage']:.1f}% of dataset"
+                )
+
+                if new_target > 0:
+                    st.session_state['tier2_targets'][label] = new_target
+                elif label in st.session_state['tier2_targets']:
+                    del st.session_state['tier2_targets'][label]
+
+        # Build label_targets dict
+        if st.session_state['tier1_targets'] or st.session_state['tier2_targets']:
+            label_targets = {}
+            if st.session_state['tier1_targets']:
+                label_targets['tier1'] = st.session_state['tier1_targets']
+            if st.session_state['tier2_targets']:
+                label_targets['tier2'] = st.session_state['tier2_targets']
+
+            # Show summary
+            with st.expander("📋 Targeting Summary", expanded=True):
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.markdown("**Tier 1 Targets:**")
+                    if st.session_state['tier1_targets']:
+                        for label, count in st.session_state['tier1_targets'].items():
+                            st.caption(f"• {label}: {count}")
+                    else:
+                        st.caption("No targets set")
+
+                with col2:
+                    st.markdown("**Tier 2 Targets:**")
+                    if st.session_state['tier2_targets']:
+                        for label, count in st.session_state['tier2_targets'].items():
+                            st.caption(f"• {label}: {count}")
+                    else:
+                        st.caption("No targets set")
+
+    st.markdown("---")
+
+    # Name and create
+    default_name = f"tiered_{obj.name}_{datetime.now().strftime('%H%M')}"
+    if use_targeting and label_targets:
+        default_name += "_targeted"
+
+    tiered_name = st.text_input("New object name:", value=default_name, key="tier_name_advanced")
+
+    if st.button("🎯 Create Tiers with Configuration", type="primary"):
+        with st.spinner("Creating tiers with custom configuration..."):
+            segmenter = DataSegmenter(obj.df, obj.scores_cache, obj.label_columns)
+
+            tier1_config = {
+                'min_consistency': tier1_min_cons,
+                'min_rerank': tier1_min_rerank,
+                'target_size': tier1_size
+            }
+
+            tier2_config = {
+                'min_consistency': tier2_min_cons,
+                'min_rerank': tier2_min_rerank,
+                'target_size': tier2_size
+            }
+
+            tier1, tier2, inference, metadata = segmenter.create_quality_tiers(
+                tier1_config,
+                tier2_config,
+                label_targets=label_targets  # ✅ NOW PASSING LABEL TARGETS
             )
 
-            st.session_state['current_data_object'] = tiered_obj
-            st.success(f"✅ Created TIERED object: Tier 1: {len(tier1)}, Tier 2: {len(tier2)}, Inference: {len(inference)}")
-            st.balloons()
-            st.rerun()
+            save_tiered_object(obj, tiered_name, tier1, tier2, inference, metadata)
+
+
+def save_tiered_object(obj, tiered_name, tier1, tier2, inference, metadata):
+    """Helper to save tiered object"""
+
+    pipeline = st.session_state.pipeline
+    tiered_obj = pipeline.create_tiered(
+        name=tiered_name,
+        parent_obj=obj,
+        tier1_df=tier1,
+        tier2_df=tier2,
+        inference_df=inference,
+        tier_config=metadata
+    )
+
+    st.session_state['current_data_object'] = tiered_obj
+
+    # Show success with details
+    st.success(f"✅ Created TIERED object: {tiered_name}")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Tier 1", len(tier1))
+    with col2:
+        st.metric("Tier 2", len(tier2))
+    with col3:
+        st.metric("Inference", len(inference))
+
+    # Show label distribution if targeting was used
+    if metadata.get('tiers', {}).get('tier1', {}).get('label_distribution'):
+        with st.expander("📊 Achieved Label Distribution"):
+            tier1_dist = metadata['tiers']['tier1']['label_distribution']
+
+            st.markdown("**Tier 1 Label Counts:**")
+            for label, info in tier1_dist.items():
+                if info['count'] > 0:
+                    st.caption(f"• {label}: {info['count']} ({info['percentage']:.1f}%)")
+
+    st.balloons()
+    st.rerun()
+
+
 
 
 def render_tiered_actions(obj: DataObject):

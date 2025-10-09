@@ -22,3 +22,6 @@ __pycache__/
 *$py.class
 *.so
 .Python
+/GOLDEN_DATASET/models/
+/GOLDEN_DATASET/data/
+/GOLDEN_DATASET/temp/
