@@ -17,4 +17,8 @@ MY_TOOLS
 CONFIGURABLE_MODEL/results
 .env
 .venv
-__pycache__
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
