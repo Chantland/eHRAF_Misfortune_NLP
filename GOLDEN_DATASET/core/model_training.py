@@ -256,14 +256,23 @@ def render_hierarchy_configuration(
 
     # Add new category
     with st.expander("➕ Add Main Category", expanded=len(hierarchy['categories']) == 0):
+        # ✅ FIX: Use session state to track input
+        if 'new_category_buffer' not in st.session_state:
+            st.session_state['new_category_buffer'] = ""
+
         col1, col2 = st.columns([3, 1])
 
         with col1:
             new_category = st.text_input(
                 "Category name:",
                 placeholder="e.g., EVENT, CAUSE, ACTION",
-                key="new_category_input"
+                key="new_category_input",
+                value=st.session_state['new_category_buffer'],
+                on_change=lambda: None  # Force update
             )
+
+            # Update buffer on every change
+            st.session_state['new_category_buffer'] = new_category
 
         with col2:
             st.write("")
@@ -274,10 +283,14 @@ def render_hierarchy_configuration(
                         'sublabels': [],
                         'enabled': True
                     }
+                    # ✅ Clear the buffer after adding
+                    st.session_state['new_category_buffer'] = ""
                     st.success(f"✅ Added {new_category}")
                     st.rerun()
                 elif new_category in hierarchy['categories']:
                     st.error("Category already exists")
+                else:
+                    st.warning("⚠️ Enter a category name first")
 
     # Configure existing categories
     if not hierarchy['categories']:
@@ -670,8 +683,15 @@ def calculate_class_weights(df: pd.DataFrame, label_columns: List[str]) -> torch
     return torch.tensor(class_weights).float()
 
 
-def compute_metrics_for_trainer(label_names):
-    """Create metrics computation function with optimal thresholds"""
+def compute_metrics_for_trainer(label_names, main_label_names=None):
+    """
+    Create metrics computation function with BOTH full and sublabel-only F1
+
+    Args:
+        label_names: All label names including main categories
+        main_label_names: List of main category names (e.g., ['EVENT', 'CAUSE', 'ACTION'])
+                         If None, assumes no main categories (flat model)
+    """
 
     def compute_metrics(eval_pred):
         predictions, labels = eval_pred
@@ -679,7 +699,7 @@ def compute_metrics_for_trainer(label_names):
         # Apply sigmoid
         predictions = torch.sigmoid(torch.tensor(predictions)).numpy()
 
-        # ✅ Find optimal threshold for each label
+        # Find optimal threshold for each label
         optimal_thresholds = []
         optimal_predictions = np.zeros_like(predictions)
 
@@ -687,7 +707,6 @@ def compute_metrics_for_trainer(label_names):
             best_threshold = 0.5
             best_f1 = 0.0
 
-            # Try thresholds from 0.1 to 0.9
             for threshold in np.arange(0.1, 0.91, 0.05):
                 pred_binary = (predictions[:, i] > threshold).astype(int)
                 f1 = f1_score(labels[:, i], pred_binary, zero_division=0)
@@ -699,9 +718,31 @@ def compute_metrics_for_trainer(label_names):
             optimal_thresholds.append(best_threshold)
             optimal_predictions[:, i] = (predictions[:, i] > best_threshold).astype(int)
 
-        # Calculate metrics with optimal thresholds
-        f1_micro = f1_score(labels, optimal_predictions, average='micro', zero_division=0)
-        f1_macro = f1_score(labels, optimal_predictions, average='macro', zero_division=0)
+        # Calculate metrics on ALL labels (original behavior)
+        f1_micro_all = f1_score(labels, optimal_predictions, average='micro', zero_division=0)
+        f1_macro_all = f1_score(labels, optimal_predictions, average='macro', zero_division=0)
+
+        # Calculate metrics on SUBLABELS ONLY (fair comparison)
+        sublabel_indices = []
+        if main_label_names:
+            # Identify indices of sublabels (not main categories)
+            for i, name in enumerate(label_names):
+                if name not in main_label_names:
+                    sublabel_indices.append(i)
+        else:
+            # Flat model - all labels are sublabels
+            sublabel_indices = list(range(len(label_names)))
+
+        if sublabel_indices:
+            labels_sub = labels[:, sublabel_indices]
+            preds_sub = optimal_predictions[:, sublabel_indices]
+
+            f1_micro_sublabels = f1_score(labels_sub, preds_sub, average='micro', zero_division=0)
+            f1_macro_sublabels = f1_score(labels_sub, preds_sub, average='macro', zero_division=0)
+        else:
+            # No sublabels (shouldn't happen, but safe fallback)
+            f1_micro_sublabels = f1_micro_all
+            f1_macro_sublabels = f1_macro_all
 
         # Per-label metrics
         per_label_f1 = {}
@@ -710,8 +751,17 @@ def compute_metrics_for_trainer(label_names):
             per_label_f1[f"f1_{name}"] = f1
 
         return {
-            'f1_micro': f1_micro,
-            'f1_macro': f1_macro,
+            # Full metrics (hierarchical models)
+            'f1_micro': f1_micro_all,  # Keep for backward compatibility
+            'f1_macro': f1_macro_all,
+            'f1_micro_all': f1_micro_all,
+            'f1_macro_all': f1_macro_all,
+
+            # Sublabel-only metrics (FAIR COMPARISON)
+            'f1_micro_sublabels': f1_micro_sublabels,
+            'f1_macro_sublabels': f1_macro_sublabels,
+
+            # Per-label breakdown
             **per_label_f1
         }
 
@@ -1551,8 +1601,53 @@ def render_training_monitor(session_state: Dict):
     # Training history
     history = session_state.get('training_history', [])
 
-    if history:
-        st.markdown("#### Recent Metrics")
+    if history and len(history) > 1:
+        st.markdown("#### Per-Label F1 Progression")
+
+        # Extract per-label F1 over epochs
+        label_names = session_state.get('final_label_list', [])
+
+        # Build dataframe of F1 scores over time
+        label_progression = []
+        for log in history:
+            if 'epoch' in log:
+                row = {'epoch': log['epoch']}
+                for label in label_names:
+                    f1_key = f'eval_f1_{label}'
+                    if f1_key in log:
+                        row[label] = log[f1_key]
+                if len(row) > 1:  # Has epoch + at least one label
+                    label_progression.append(row)
+
+        if label_progression:
+            prog_df = pd.DataFrame(label_progression)
+
+            # Plot struggling labels
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+
+            # Identify struggling labels (final F1 < 0.5)
+            final_row = prog_df.iloc[-1]
+            struggling = [col for col in prog_df.columns
+                          if col != 'epoch' and final_row[col] < 0.5]
+
+            # Plot struggling labels prominently
+            for label in struggling:
+                ax.plot(prog_df['epoch'], prog_df[label],
+                        marker='o', linewidth=2, label=label)
+
+            ax.axhline(y=0.5, color='r', linestyle='--', alpha=0.3, label='F1 = 0.5')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('F1 Score')
+            ax.set_title('Struggling Labels Performance Over Time')
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            ax.grid(alpha=0.3)
+
+            st.pyplot(fig)
+            plt.close()
+
+            st.caption(f"⚠️ Showing {len(struggling)} labels with F1 < 0.5")
 
         latest = history[-1]
 
@@ -1684,6 +1779,155 @@ Files:
 - test_results.png
 - training_info.json
                 """)
+
+
+def extract_sublabel_metrics(
+        results: Dict,
+        all_label_names: List[str],
+        main_label_names: List[str] = None
+) -> Dict:
+    """
+    Extract only sublabel metrics from test results
+
+    Args:
+        results: Test results dictionary
+        all_label_names: All label names in the model
+        main_label_names: Main category names to exclude (None for flat models)
+
+    Returns:
+        Dictionary with sublabel-only metrics
+    """
+    if main_label_names is None:
+        main_label_names = []
+
+    # Identify sublabels
+    sublabels = [name for name in all_label_names if name not in main_label_names]
+
+    # Extract sublabel F1 scores
+    sublabel_f1s = {}
+    for sublabel in sublabels:
+        key = f'eval_f1_{sublabel}'
+        if key in results:
+            sublabel_f1s[sublabel] = results[key]
+
+    # Calculate micro/macro for sublabels only
+    if sublabel_f1s:
+        f1_values = list(sublabel_f1s.values())
+        sublabel_metrics = {
+            'f1_micro_sublabels': results.get('eval_f1_micro_sublabels', np.mean(f1_values)),
+            'f1_macro_sublabels': results.get('eval_f1_macro_sublabels', np.mean(f1_values)),
+            'per_label': sublabel_f1s,
+            'sublabel_names': sublabels
+        }
+    else:
+        sublabel_metrics = {
+            'f1_micro_sublabels': 0.0,
+            'f1_macro_sublabels': 0.0,
+            'per_label': {},
+            'sublabel_names': []
+        }
+
+    return sublabel_metrics
+
+
+def compare_models_fairly(
+        model1_results: Dict,
+        model1_label_names: List[str],
+        model1_main_labels: List[str],
+        model2_results: Dict,
+        model2_label_names: List[str],
+        model2_main_labels: List[str],
+        model1_name: str = "Model 1",
+        model2_name: str = "Model 2"
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Compare two models using ONLY sublabel metrics for fair comparison
+
+    Args:
+        model1_results: Test results from first model
+        model1_label_names: All label names from first model
+        model1_main_labels: Main category names from first model (empty list for flat)
+        model2_results: Test results from second model
+        model2_label_names: All label names from second model
+        model2_main_labels: Main category names from second model (empty list for flat)
+        model1_name: Display name for first model
+        model2_name: Display name for second model
+
+    Returns:
+        Tuple of (comparison_dataframe, summary_stats)
+    """
+
+    # Extract sublabel metrics
+    model1_sub = extract_sublabel_metrics(model1_results, model1_label_names, model1_main_labels)
+    model2_sub = extract_sublabel_metrics(model2_results, model2_label_names, model2_main_labels)
+
+    # Build comparison dataframe
+    comparison = {
+        'Metric': [],
+        model1_name: [],
+        model2_name: [],
+        'Difference': [],
+        'Winner': []
+    }
+
+    # Overall metrics
+    comparison['Metric'].append('F1 Micro (Sublabels) ⭐')
+    m1_micro = model1_sub['f1_micro_sublabels']
+    m2_micro = model2_sub['f1_micro_sublabels']
+    comparison[model1_name].append(f"{m1_micro:.3f}")
+    comparison[model2_name].append(f"{m2_micro:.3f}")
+    diff_micro = m1_micro - m2_micro
+    comparison['Difference'].append(f"{diff_micro:+.3f}")
+    comparison['Winner'].append(model1_name if diff_micro > 0.001 else (model2_name if diff_micro < -0.001 else 'Tie'))
+
+    comparison['Metric'].append('F1 Macro (Sublabels)')
+    m1_macro = model1_sub['f1_macro_sublabels']
+    m2_macro = model2_sub['f1_macro_sublabels']
+    comparison[model1_name].append(f"{m1_macro:.3f}")
+    comparison[model2_name].append(f"{m2_macro:.3f}")
+    diff_macro = m1_macro - m2_macro
+    comparison['Difference'].append(f"{diff_macro:+.3f}")
+    comparison['Winner'].append(model1_name if diff_macro > 0.001 else (model2_name if diff_macro < -0.001 else 'Tie'))
+
+    # Per-sublabel comparison
+    # Find common sublabels
+    common_sublabels = set(model1_sub['sublabel_names']) & set(model2_sub['sublabel_names'])
+
+    if common_sublabels:
+        comparison['Metric'].append('--- Per-Label Results ---')
+        comparison[model1_name].append('')
+        comparison[model2_name].append('')
+        comparison['Difference'].append('')
+        comparison['Winner'].append('')
+
+        for sublabel in sorted(common_sublabels):
+            comparison['Metric'].append(sublabel)
+
+            m1_val = model1_sub['per_label'].get(sublabel, 0)
+            m2_val = model2_sub['per_label'].get(sublabel, 0)
+
+            comparison[model1_name].append(f"{m1_val:.3f}")
+            comparison[model2_name].append(f"{m2_val:.3f}")
+
+            diff = m1_val - m2_val
+            comparison['Difference'].append(f"{diff:+.3f}")
+            comparison['Winner'].append(model1_name if diff > 0.001 else (model2_name if diff < -0.001 else 'Tie'))
+
+    # Summary statistics
+    summary = {
+        'model1_name': model1_name,
+        'model2_name': model2_name,
+        'model1_f1_micro': m1_micro,
+        'model2_f1_micro': m2_micro,
+        'difference': diff_micro,
+        'winner': model1_name if diff_micro > 0.001 else (model2_name if diff_micro < -0.001 else 'Tie'),
+        'num_common_sublabels': len(common_sublabels),
+        'model1_better_count': sum(1 for w in comparison['Winner'][2:] if w == model1_name),
+        'model2_better_count': sum(1 for w in comparison['Winner'][2:] if w == model2_name),
+        'ties': sum(1 for w in comparison['Winner'][2:] if w == 'Tie')
+    }
+
+    return pd.DataFrame(comparison), summary
 
 
 # ============================================================================
@@ -1846,7 +2090,7 @@ def start_training(
         logging_steps=50,
         eval_strategy="epoch",
         save_strategy="epoch",
-        save_total_limit=3,
+        save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="eval_f1_micro",
         greater_is_better=True,
@@ -1856,7 +2100,16 @@ def start_training(
         remove_unused_columns=False,
     )
 
-    # Initialize trainer
+    from transformers import EarlyStoppingCallback
+
+    main_label_names = None
+    if config["use_hierarchy"] and config["predict_main_labels"]:
+        # Extract main category names from label structure
+        main_label_names = [
+            cat_name for cat_name, cat_data in label_structure.items()
+            if cat_data.get('enabled', True)
+        ]
+
     trainer = HierarchicalTrainer(
         model=training_session.model,
         args=training_args,
@@ -1864,9 +2117,18 @@ def start_training(
         eval_dataset=val_dataset,
         processing_class=training_session.tokenizer,
         data_collator=DataCollatorWithPadding(training_session.tokenizer),
-        compute_metrics=compute_metrics_for_trainer(final_label_list),
+        compute_metrics=compute_metrics_for_trainer(
+            final_label_list,
+            main_label_names=main_label_names  # NEW: Pass main labels
+        ),
         class_weights=class_weights,
         teacher_forcing_ratio=config.get("teacher_forcing_ratio", 0.5),
+        callbacks=[
+            EarlyStoppingCallback(
+                early_stopping_patience=3,  # Stop if no improvement for 3 epochs
+                early_stopping_threshold=0.001  # Minimum improvement considered significant
+            )
+        ]
     )
 
     # Train
@@ -1892,6 +2154,30 @@ def start_training(
         # Evaluate on test set
         st.info("📊 Evaluating on test set...")
         test_results = trainer.evaluate(eval_dataset=test_dataset)
+
+        # Calculate sublabel-only metrics for fair comparison
+        st.info("📊 Calculating sublabel-only metrics for fair comparison...")
+
+        if config["use_hierarchy"] and config["predict_main_labels"]:
+            # Hierarchical model - need to exclude main categories
+            from core.model_training import extract_sublabel_metrics
+
+            sublabel_metrics = extract_sublabel_metrics(
+                test_results,
+                final_label_list,
+                list(label_structure.keys())  # Main category names
+            )
+
+            # Add to test results
+            test_results['eval_f1_micro_sublabels'] = sublabel_metrics['f1_micro_sublabels']
+            test_results['eval_f1_macro_sublabels'] = sublabel_metrics['f1_macro_sublabels']
+
+            st.info(f"✅ Sublabel-only F1: {sublabel_metrics['f1_micro_sublabels']:.3f} (fair comparison metric)")
+        else:
+            # Flat model - all labels are sublabels
+            test_results['eval_f1_micro_sublabels'] = test_results.get('eval_f1_micro', 0)
+            test_results['eval_f1_macro_sublabels'] = test_results.get('eval_f1_macro', 0)
+
         session_state['test_results'] = test_results
 
         st.success(f"✅ Test F1 Micro: {test_results.get('eval_f1_micro', 0):.3f}")

@@ -1,0 +1,106 @@
+{
+  "best_global_step": 236,
+  "best_metric": 0.4510288065843621,
+  "best_model_checkpoint": "models/training_20251009_191020/checkpoint-236",
+  "epoch": 2.0,
+  "eval_steps": 500,
+  "global_step": 236,
+  "is_hyper_param_search": false,
+  "is_local_process_zero": true,
+  "is_world_process_zero": true,
+  "log_history": [
+    {
+      "epoch": 0.423728813559322,
+      "grad_norm": 1.4345784187316895,
+      "learning_rate": 1.9600000000000003e-06,
+      "loss": 4.4025,
+      "step": 50
+    },
+    {
+      "epoch": 0.847457627118644,
+      "grad_norm": 2.932443141937256,
+      "learning_rate": 3.96e-06,
+      "loss": 4.333,
+      "step": 100
+    },
+    {
+      "epoch": 1.0,
+      "eval_f1_Accident": 0.0,
+      "eval_f1_Divination": 0.0,
+      "eval_f1_Illness": 0.0,
+      "eval_f1_Material_Physical": 0.38461538461538464,
+      "eval_f1_Other": 0.0,
+      "eval_f1_Physical_Material": 0.0,
+      "eval_f1_Priest_High_Religion": 0.0,
+      "eval_f1_Rule_Violation_Taboo": 0.0,
+      "eval_f1_Shaman_Medium_Healer": 0.0,
+      "eval_f1_Spirits_Gods": 0.5314685314685315,
+      "eval_f1_Technical_Specialist": 0.0,
+      "eval_f1_Witchcraft_Sorcery": 0.0,
+      "eval_f1_macro": 0.07634032634032634,
+      "eval_f1_micro": 0.2507462686567164,
+      "eval_loss": 4.127458095550537,
+      "eval_runtime": 4.2867,
+      "eval_samples_per_second": 48.988,
+      "eval_steps_per_second": 3.266,
+      "step": 118
+    },
+    {
+      "epoch": 1.271186440677966,
+      "grad_norm": 4.2102532386779785,
+      "learning_rate": 5.9600000000000005e-06,
+      "loss": 4.1107,
+      "step": 150
+    },
+    {
+      "epoch": 1.694915254237288,
+      "grad_norm": 4.708066463470459,
+      "learning_rate": 7.960000000000002e-06,
+      "loss": 3.8247,
+      "step": 200
+    },
+    {
+      "epoch": 2.0,
+      "eval_f1_Accident": 0.0,
+      "eval_f1_Divination": 0.0,
+      "eval_f1_Illness": 0.8268156424581006,
+      "eval_f1_Material_Physical": 0.38461538461538464,
+      "eval_f1_Other": 0.0,
+      "eval_f1_Physical_Material": 0.0,
+      "eval_f1_Priest_High_Religion": 0.0,
+      "eval_f1_Rule_Violation_Taboo": 0.0,
+      "eval_f1_Shaman_Medium_Healer": 0.0,
+      "eval_f1_Spirits_Gods": 0.5314685314685315,
+      "eval_f1_Technical_Specialist": 0.0,
+      "eval_f1_Witchcraft_Sorcery": 0.0,
+      "eval_f1_macro": 0.1452416298785014,
+      "eval_f1_micro": 0.4510288065843621,
+      "eval_loss": 3.445830821990967,
+      "eval_runtime": 4.2821,
+      "eval_samples_per_second": 49.041,
+      "eval_steps_per_second": 3.269,
+      "step": 236
+    }
+  ],
+  "logging_steps": 50,
+  "max_steps": 1180,
+  "num_input_tokens_seen": 0,
+  "num_train_epochs": 10,
+  "save_steps": 500,
+  "stateful_callbacks": {
+    "TrainerControl": {
+      "args": {
+        "should_epoch_stop": false,
+        "should_evaluate": false,
+        "should_log": false,
+        "should_save": true,
+        "should_training_stop": false
+      },
+      "attributes": {}
+    }
+  },
+  "total_flos": 995516363685888.0,
+  "train_batch_size": 16,
+  "trial_name": null,
+  "trial_params": null
+}

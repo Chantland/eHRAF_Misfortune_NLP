@@ -558,3 +558,69 @@ def render_model_comparison_ui(
                 f"{full_agreement}/{total_passages}",
                 f"{full_agreement / total_passages * 100:.1f}%"
             )
+
+
+def compare_models_fairly(
+        hierarchical_results: Dict,
+        flat_results: Dict,
+        hierarchical_main_labels: List[str] = None
+) -> pd.DataFrame:
+    """
+    Compare hierarchical and flat models using ONLY sublabel metrics
+
+    Args:
+        hierarchical_results: Test results from hierarchical model
+        flat_results: Test results from flat model
+        hierarchical_main_labels: Main category names to exclude
+
+    Returns:
+        Comparison dataframe
+    """
+
+    comparison = {
+        'Metric': [],
+        'Hierarchical': [],
+        'Flat': [],
+        'Difference': []
+    }
+
+    # Overall comparison (sublabels only)
+    comparison['Metric'].append('F1 Micro (Sublabels)')
+    hier_f1 = hierarchical_results.get('eval_f1_micro_sublabels', 0)
+    flat_f1 = flat_results.get('eval_f1_micro', 0)  # Flat has no main labels
+    comparison['Hierarchical'].append(f"{hier_f1:.3f}")
+    comparison['Flat'].append(f"{flat_f1:.3f}")
+    comparison['Difference'].append(f"{(hier_f1 - flat_f1):+.3f}")
+
+    comparison['Metric'].append('F1 Macro (Sublabels)')
+    hier_macro = hierarchical_results.get('eval_f1_macro_sublabels', 0)
+    flat_macro = flat_results.get('eval_f1_macro', 0)
+    comparison['Hierarchical'].append(f"{hier_macro:.3f}")
+    comparison['Flat'].append(f"{flat_macro:.3f}")
+    comparison['Difference'].append(f"{(hier_macro - flat_macro):+.3f}")
+
+    # Per-sublabel comparison
+    if hierarchical_main_labels:
+        # Get sublabel names
+        all_sublabels = set()
+
+        for key in hierarchical_results.keys():
+            if key.startswith('eval_f1_'):
+                label_name = key.replace('eval_f1_', '')
+                # Skip main categories and summary metrics
+                if (label_name not in hierarchical_main_labels and
+                        label_name not in ['micro', 'macro', 'micro_all', 'macro_all',
+                                           'micro_sublabels', 'macro_sublabels']):
+                    all_sublabels.add(label_name)
+
+        for sublabel in sorted(all_sublabels):
+            comparison['Metric'].append(sublabel)
+
+            hier_val = hierarchical_results.get(f'eval_f1_{sublabel}', 0)
+            flat_val = flat_results.get(f'eval_f1_{sublabel}', 0)
+
+            comparison['Hierarchical'].append(f"{hier_val:.3f}")
+            comparison['Flat'].append(f"{flat_val:.3f}")
+            comparison['Difference'].append(f"{(hier_val - flat_val):+.3f}")
+
+    return pd.DataFrame(comparison)
