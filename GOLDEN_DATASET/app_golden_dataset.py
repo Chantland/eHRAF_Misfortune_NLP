@@ -63,37 +63,19 @@ with st.sidebar:
     )
 
     st.markdown("---")
-
-    # Dataset info (if loaded)
     render_sidebar_info()
 
+    # ✅ ADD: Collapsible AI Assistant at bottom
     st.markdown("---")
 
-    # Quick actions
-    st.markdown("### ⚡ Quick Actions")
+    with st.expander("💬 AI Assistant", expanded=False):
+        if 'global_chat' not in st.session_state:
+            st.session_state.global_chat = GlobalChatAssistant()
 
-    if st.button("🔄 Refresh", width='stretch'):
-        st.rerun()
-
-    if st.button("🗑️ Clear Cache", width='stretch'):
-        st.cache_data.clear()
-        st.success("✅ Cache cleared")
-
-    # Help
-    with st.expander("❓ Help"):
-        st.markdown("""
-        **Data Page**: Load, clean, and prepare datasets for training
-        
-        **Models Page**: Train, evaluate, and compare classification models
-        
-        **Discover Page**: Explore data with semantic search and model inference
-        
-        **Chat**: Ask questions, get insights, automate tasks (available on all pages)
-        """)
-
-    # Footer
-    st.markdown("---")
-    st.caption("Built with Streamlit • Voyage AI • Pinecone")
+        st.session_state.global_chat.render(
+            current_page=page,
+            session_state=st.session_state
+        )
 
 # ============================================================================
 # GLOBAL CHAT ASSISTANT

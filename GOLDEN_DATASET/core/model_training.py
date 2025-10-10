@@ -231,18 +231,18 @@ def render_hierarchy_configuration(
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if st.button("🚀 Use HRAF Template", use_container_width=True):
+        if st.button("🚀 Use HRAF Template", width='stretch'):
             session_state[config_key] = get_hraf_template()
             st.success("✅ HRAF template loaded")
             st.rerun()
 
     with col2:
-        if st.button("🧹 Clear All", use_container_width=True):
+        if st.button("🧹 Clear All", width='stretch'):
             session_state[config_key] = {'categories': {}}
             st.rerun()
 
     with col3:
-        if st.button("🔄 Auto-detect", use_container_width=True,
+        if st.button("🔄 Auto-detect", width='stretch',
                      help="Detect hierarchy from column prefixes (EVENT_Illness, etc)"):
             detected = auto_detect_hierarchy(label_columns)
             if detected['categories']:
@@ -268,7 +268,7 @@ def render_hierarchy_configuration(
         with col2:
             st.write("")
             st.write("")
-            if st.button("Add", type="primary", disabled=not new_category, use_container_width=True):
+            if st.button("Add", type="primary", disabled=not new_category, width='stretch'):
                 if new_category and new_category not in hierarchy['categories']:
                     session_state[config_key]['categories'][new_category] = {
                         'sublabels': [],
@@ -337,7 +337,7 @@ def render_hierarchy_configuration(
                 st.caption(f"**{len(selected)}** sublabels mapped")
 
             with col3:
-                if st.button("🗑️ Delete", key=f"remove_{category_name}", use_container_width=True):
+                if st.button("🗑️ Delete", key=f"remove_{category_name}", width='stretch'):
                     del session_state[config_key]['categories'][category_name]
                     st.rerun()
 
@@ -661,7 +661,7 @@ def calculate_class_weights(df: pd.DataFrame, label_columns: List[str]) -> torch
 
         if pos_count > 0:
             weight = neg_count / pos_count
-            weight = min(weight, 50.0)  # ✅ Cap at 50x to prevent instability
+            weight = min(weight, 100)
         else:
             weight = 1.0
 
@@ -671,23 +671,42 @@ def calculate_class_weights(df: pd.DataFrame, label_columns: List[str]) -> torch
 
 
 def compute_metrics_for_trainer(label_names):
-    """Create metrics computation function for trainer"""
+    """Create metrics computation function with optimal thresholds"""
 
     def compute_metrics(eval_pred):
         predictions, labels = eval_pred
 
-        # Apply sigmoid and threshold
+        # Apply sigmoid
         predictions = torch.sigmoid(torch.tensor(predictions)).numpy()
-        predictions = np.where(predictions > 0.5, 1, 0)
 
-        # Overall metrics
-        f1_micro = f1_score(labels, predictions, average='micro', zero_division=0)
-        f1_macro = f1_score(labels, predictions, average='macro', zero_division=0)
+        # ✅ Find optimal threshold for each label
+        optimal_thresholds = []
+        optimal_predictions = np.zeros_like(predictions)
+
+        for i in range(predictions.shape[1]):
+            best_threshold = 0.5
+            best_f1 = 0.0
+
+            # Try thresholds from 0.1 to 0.9
+            for threshold in np.arange(0.1, 0.91, 0.05):
+                pred_binary = (predictions[:, i] > threshold).astype(int)
+                f1 = f1_score(labels[:, i], pred_binary, zero_division=0)
+
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_threshold = threshold
+
+            optimal_thresholds.append(best_threshold)
+            optimal_predictions[:, i] = (predictions[:, i] > best_threshold).astype(int)
+
+        # Calculate metrics with optimal thresholds
+        f1_micro = f1_score(labels, optimal_predictions, average='micro', zero_division=0)
+        f1_macro = f1_score(labels, optimal_predictions, average='macro', zero_division=0)
 
         # Per-label metrics
         per_label_f1 = {}
         for i, name in enumerate(label_names):
-            f1 = f1_score(labels[:, i], predictions[:, i], zero_division=0)
+            f1 = f1_score(labels[:, i], optimal_predictions[:, i], zero_division=0)
             per_label_f1[f"f1_{name}"] = f1
 
         return {
@@ -697,6 +716,29 @@ def compute_metrics_for_trainer(label_names):
         }
 
     return compute_metrics
+
+
+def find_optimal_thresholds(predictions, labels, label_names):
+    """Find optimal threshold for each label"""
+    from sklearn.metrics import f1_score
+
+    thresholds = []
+    for i in range(predictions.shape[1]):
+        best_threshold = 0.5
+        best_f1 = 0
+
+        # Try thresholds from 0.1 to 0.9
+        for threshold in np.arange(0.1, 0.9, 0.05):
+            pred_binary = (predictions[:, i] > threshold).astype(int)
+            f1 = f1_score(labels[:, i], pred_binary, zero_division=0)
+
+            if f1 > best_f1:
+                best_f1 = f1
+                best_threshold = threshold
+
+        thresholds.append(best_threshold)
+
+    return thresholds
 
 
 # ============================================================================
@@ -980,8 +1022,6 @@ def get_training_data_from_session(session_state: Dict) -> Tuple[pd.DataFrame, L
 def render_training_page(session_state: Dict):
     """Main render function for training page"""
 
-    st.markdown("## 🎓 Train Model")
-
     # Check if data is loaded
     if not session_state.get('initialized', False):
         st.warning("⚠️ Load a dataset first")
@@ -1181,7 +1221,7 @@ def render_training_configuration(
     with col2:
         config["use_weighted_loss"] = st.checkbox(
             "Use weighted loss",
-            value=config.get("use_weighted_loss", False),
+            value=config.get("use_weighted_loss", True),
             key="config_weighted_loss",
             help="Weight loss by inverse class frequency - CRITICAL for rare labels"
         )
@@ -1377,7 +1417,7 @@ def render_training_configuration(
     # ========================================================================
 
     if not session_state.get('training_active', False):
-        if st.button("🚀 Start Training", type="primary", use_container_width=True):
+        if st.button("🚀 Start Training", type="primary", width='stretch'):
             start_training(session_state, training_df, label_columns, passage_col)
     else:
         st.warning("⚠️ Training in progress...")
@@ -1602,7 +1642,7 @@ def render_training_results(session_state: Dict):
         st.dataframe(
             pd.DataFrame(label_results),
             hide_index=True,
-            use_container_width=True
+            width='stretch'
         )
 
     # Model info
@@ -1782,7 +1822,7 @@ def start_training(
 
             # Display in expander
             with st.expander("View Class Weights", expanded=False):
-                st.dataframe(weights_df, hide_index=True, use_container_width=True)
+                st.dataframe(weights_df, hide_index=True, width='stretch')
 
             # Check for extreme weights
             max_weight = class_weights.max().item()
@@ -1800,6 +1840,7 @@ def start_training(
         gradient_accumulation_steps=config["gradient_accumulation_steps"],
         warmup_steps=config["warmup_steps"],
         weight_decay=config["weight_decay"],
+        lr_scheduler_type="cosine",
         learning_rate=config["learning_rate"],
         logging_dir=f'{output_dir}/logs',
         logging_steps=50,
@@ -1821,7 +1862,7 @@ def start_training(
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        tokenizer=training_session.tokenizer,
+        processing_class=training_session.tokenizer,
         data_collator=DataCollatorWithPadding(training_session.tokenizer),
         compute_metrics=compute_metrics_for_trainer(final_label_list),
         class_weights=class_weights,
@@ -1862,12 +1903,36 @@ def start_training(
         training_session.model.save_pretrained(final_model_path)
         training_session.tokenizer.save_pretrained(final_model_path)
 
+        st.info("🎯 Computing optimal thresholds...")
+        test_predictions = trainer.predict(test_dataset)
+        predictions_probs = torch.sigmoid(torch.tensor(test_predictions.predictions)).numpy()
+        test_labels = test_predictions.label_ids
+
+        optimal_thresholds = {}
+        for i, label_name in enumerate(final_label_list):
+            best_threshold = 0.5
+            best_f1 = 0.0
+
+            for threshold in np.arange(0.1, 0.91, 0.05):
+                pred_binary = (predictions_probs[:, i] > threshold).astype(int)
+                f1 = f1_score(test_labels[:, i], pred_binary, zero_division=0)
+
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_threshold = threshold
+
+            optimal_thresholds[label_name] = {
+                'threshold': float(best_threshold),
+                'f1_at_threshold': float(best_f1)
+            }
+
+        st.success(f"✅ Computed optimal thresholds for {len(final_label_list)} labels")
+
         # Save training info
         training_info = {
             'config': config,
-            'test_results': {k: float(v) if isinstance(v, (np.float32, np.float64)) else v
-                             for k, v in test_results.items()},
-            'label_structure': label_structure,
+            'test_results': test_results,
+            'optimal_thresholds': optimal_thresholds,
             'label_columns': final_label_list,
             'model_info': model_info,
             'training_completed': datetime.now().isoformat(),

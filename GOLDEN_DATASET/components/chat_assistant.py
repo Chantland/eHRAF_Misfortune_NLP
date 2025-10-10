@@ -384,10 +384,10 @@ class GlobalChatAssistant:
             }
 
     def _build_system_context(
-        self,
-        current_page: str,
-        session_state: Dict,
-        enable_actions: bool
+            self,
+            current_page: str,
+            session_state: Dict,
+            enable_actions: bool
     ) -> List[Dict[str, Any]]:
         """Build system context with page awareness"""
 
@@ -396,77 +396,75 @@ class GlobalChatAssistant:
                 "type": "text",
                 "text": f"""You are an AI assistant for the HRAF Golden Dataset Discovery tool.
 
-# Current Context
-- **Current Page:** {current_page}
-- **Dataset Loaded:** {'Yes' if session_state.get('initialized') else 'No'}
-- **Actions Enabled:** {'Yes' if enable_actions else 'No'}
-
-# Your Capabilities
-You have FULL ACCESS to:
-- Read any passage by index
-- Analyze label distributions
-- Run predictions with multiple models
-- Search for similar passages
-- Execute actions to help the user
-- Navigate between pages
-
-# Response Style
-- Be concise but thorough
-- Provide specific examples when possible
-- Suggest actions when appropriate
-- Reference actual data from the session
-
-# Action Execution
-When the user asks you to DO something (not just explain), execute actions immediately.
-
-Available actions on Models page:
-- load_model(model_name='...')
-- configure_training(num_epochs=10, batch_size=16, learning_rate=2e-5, ...)
-- start_training(dataset='current')
-- evaluate_model(model_name='...', num_passages=100)
-- compare_models(model_names=['model1', 'model2'])
-
-To execute an action, include in your response:
-ACTION: action_name(param1=value1, param2=value2)
-
-Example responses:
-User: "Load the roberta model"
-Assistant: "I'll load that model for you.
-ACTION: load_model(model_name='roberta')"
-
-User: "Train with 20 epochs and batch size 32"
-Assistant: "I'll configure those settings and start training.
-ACTION: configure_training(num_epochs=20, batch_size=32)
-ACTION: start_training(dataset='current')"
-
-User: "Compare all loaded models"
-Assistant: "I'll compare the loaded models.
-ACTION: compare_models(model_names=['model1', 'model2'])"
-
-**CRITICAL:** Always execute actions when requested. Don't just explain what to do.
-
-Available actions:
-{self._format_available_actions(current_page) if enable_actions else 'Actions disabled - can only provide information'}
-
-To execute an action, include in your response:
-ACTION: action_name(param1=value1, param2=value2)
-
-Example:
-"I'll search for passages about shamans for you.
-ACTION: semantic_search(query='shamans healing illness', top_k=10)"
-""",
-                "cache_control": {"type": "ephemeral"}
+    # Current Context
+    - **Current Page:** {current_page}
+    - **Dataset Loaded:** {'Yes' if session_state.get('initialized') else 'No'}
+    - **Actions Enabled:** {'Yes' if enable_actions else 'No'}
+    - **Training Active:** {'Yes' if session_state.get('training_active') else 'No'}
+    
+    # Your Capabilities
+    You have FULL ACCESS to:
+    - Read any passage by index
+    - Analyze label distributions
+    - Run predictions with multiple models
+    - Search for similar passages
+    - Execute actions to help the user
+    - Navigate between pages
+    
+    # Response Style
+    - Be concise but thorough
+    - Provide specific examples when possible
+    - Suggest actions when appropriate
+    - Reference actual data from the session
+    
+    # Action Execution
+    When the user asks you to DO something (not just explain), execute actions immediately.
+    
+    Available actions on Models page:
+    - load_model(model_name='...')
+    - configure_training(num_epochs=10, batch_size=16, learning_rate=2e-5, ...)
+    - start_training(dataset='current')
+    - evaluate_model(model_name='...', num_passages=100)
+    - compare_models(model_names=['model1', 'model2'])
+    
+    To execute an action, include in your response:
+    ACTION: action_name(param1=value1, param2=value2)
+    
+    Example responses:
+    User: "Load the roberta model"
+    Assistant: "I'll load that model for you.
+    ACTION: load_model(model_name='roberta')"
+    
+    User: "Train with 20 epochs and batch size 32"
+    Assistant: "I'll configure those settings and start training.
+    ACTION: configure_training(num_epochs=20, batch_size=32)
+    ACTION: start_training(dataset='current')"
+    
+    User: "Compare all loaded models"
+    Assistant: "I'll compare the loaded models.
+    ACTION: compare_models(model_names=['model1', 'model2'])"
+    
+    **CRITICAL:** Always execute actions when requested. Don't just explain what to do.
+    
+    Available actions:
+    {self._format_available_actions(current_page) if enable_actions else 'Actions disabled - can only provide information'}
+    
+    To execute an action, include in your response:
+    ACTION: action_name(param1=value1, param2=value2)
+    
+    Example:
+    "I'll search for passages about shamans for you.
+    ACTION: semantic_search(query='shamans healing illness', top_k=10)"
+    """
             }
         ]
 
-        # Add dataset context if loaded
         if session_state.get('initialized'):
             dataset_context = self._build_dataset_context(session_state)
             if dataset_context:
                 system_blocks.append({
                     "type": "text",
                     "text": dataset_context,
-                    "cache_control": {"type": "ephemeral"}
                 })
 
         return system_blocks
@@ -879,6 +877,44 @@ ACTION: semantic_search(query='shamans healing illness', top_k=10)"
 
         except Exception as e:
             return f"❌ Error: {str(e)}"
+
+    def _action_analyze_training_config(self, session_state: Dict) -> str:
+        """Action: Analyze current training configuration"""
+        try:
+            config = session_state.get('training_config')
+
+            if not config:
+                return "❌ No training configuration found. Configure training first."
+
+            # Build analysis summary
+            summary = []
+            summary.append("📋 **Current Training Configuration:**\n")
+
+            # Model architecture
+            summary.append(f"**Model:** {config.get('base_model', 'unknown')}")
+            summary.append(f"**Hierarchical:** {config.get('use_hierarchy', False)}")
+            if config.get('use_hierarchy'):
+                summary.append(f"  - Gated: {config.get('gated_hierarchy', False)}")
+                summary.append(f"  - Gate threshold: {config.get('gate_threshold', 0.5)}")
+
+            # Loss configuration
+            summary.append(f"\n**Loss Configuration:**")
+            summary.append(f"  - Focal loss: {config.get('use_focal_loss', False)}")
+            if config.get('use_focal_loss'):
+                summary.append(f"    - Gamma: {config.get('focal_gamma', 2.0)}")
+            summary.append(f"  - Weighted loss: {config.get('use_weighted_loss', False)}")
+
+            # Training params
+            summary.append(f"\n**Training Parameters:**")
+            summary.append(f"  - Epochs: {config.get('num_epochs', 10)}")
+            summary.append(f"  - Batch size: {config.get('batch_size', 16)}")
+            summary.append(f"  - Learning rate: {config.get('learning_rate', 2e-5):.2e}")
+            summary.append(f"  - Warmup steps: {config.get('warmup_steps', 500)}")
+
+            return "\n".join(summary)
+
+        except Exception as e:
+            return f"❌ Error analyzing config: {str(e)}"
 
     def _action_load_dataset(self, session_state: Dict, source: str = 'file') -> str:
         """Action: Load dataset"""
