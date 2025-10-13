@@ -16,4 +16,7 @@ MY_TOOLS
 .idea
 CONFIGURABLE_MODEL/results
 .env
-.venv
+venv
+
+__pycache__
+
