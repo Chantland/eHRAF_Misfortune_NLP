@@ -16,7 +16,16 @@ MY_TOOLS
 .idea
 CONFIGURABLE_MODEL/results
 .env
+<<<<<<< HEAD
 venv
 
 __pycache__
+=======
+.venv
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+>>>>>>> a4941b3cc528ded2e6ea962b47b91ec2266b31e1
 

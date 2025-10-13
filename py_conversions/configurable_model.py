@@ -1,5 +1,5 @@
 #%% md
-# # Hierarchical Multi-Label Classification Model  -  Configurable
+# # Configurable Multi-label Classification Training Model
 # This notebook provides a highly configurable framework for training hierarchical or flat multi-label classification models on the HRAF misfortune dataset. All key parameters can be adjusted in Cell 2 without modifying the core code.
 # 
 # To use this notebook:
@@ -49,60 +49,49 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 #%%
 # ============================================================================
-# CELL 2: CONFIGURATION PARAMETERS
+# CELL 2: CONFIGURATION PARAMETERS - ENHANCED WITH MAIN LABEL CONTROL
 # ============================================================================
 
 # -------------------------------------------------------------------------
 # EXPERIMENT NAMING
 # -------------------------------------------------------------------------
 EXPERIMENT_CONFIG = {
-    # Change this name for each experiment to save results separately
-    "experiment_name": "roberta_focal_loss_gated",  # e.g., "focal_loss_test", "no_gating", "lower_threshold"
-
-    # Automatically generate name based on key settings
-    "auto_name": False,  # If True, will auto-generate name from settings
+    "experiment_name": "model_5_roberta_replica_kfold",
+    "auto_name": False,
 }
 
 # -------------------------------------------------------------------------
 # MODEL ARCHITECTURE PARAMETERS
 # -------------------------------------------------------------------------
 CONFIG = {
-    # Base transformer model (can be changed to distilbert-base-uncased, roberta-base, bert-base, etc.)
     "base_model": "roberta-base",
 
-    # Hierarchical architecture settings
-    "use_hierarchy": True,  # If False, treats as independent multi-label (Flat model), If True the model thinks in steps ("Is there an event?" then "What kind of event?").
-    "gated_hierarchy": True,  # If True, sublabels are only predicted when main label is positive; If False sublabels are classified independently with main category predictions as input.
-    "gate_threshold": 0.3,  # Threshold for gating (when main label probability enables sublabel - higher threshold means stricter gating)
+    # Hierarchy settings
+    "use_hierarchy": False,
+    "gated_hierarchy": False,
+    "gate_threshold": 0.5,
 
-    # Hidden layer sizes
-    "hidden_size": 768,  # Don't change unless trying a larger model. This is correct for the models you are working with.
-    "hierarchical_hidden_size": 265,   # Could be 50, 256, 512, etc., adjust this to give the model more "thinking space". Higher numbers could help with the model pick up nuances, too high could lead to "over-thinking"
-    "num_hidden_layers": 2,  # How many layers (steps) more (3) could lead to overfitting (memorizing rather than learning); less (1) might miss complex patterns - but might also help compensate for the noisy data
+    # NEW: Control whether to predict main category labels
+    "predict_main_labels": False,
 
-    # Regularization
-    "dropout": 0.2, # this randomly blocks % of model parameters to prevent overfitting and force. Helps prevent the mnodel from learning the quirks and biases of the RAs
-    "attention_dropout": 0.1, # This randomly deletes a % of word relationships keeping the model from over relying on any single parameter too heavily
+    # Hidden layer configuration
+    "hidden_size": 768,
+    "hierarchical_hidden_size": 256,
+    "num_hidden_layers": 2,
 
-    # Loss function settings - Currently, we shouldn't set both use_weighted_loss and use_focal_loss to True.
-    "use_weighted_loss": False,  # Use class weights for imbalanced data (Rare labels like Action:Priest_High_Religion are weighted more heavily) If True, each label gets a multiplier based on rarity. Loss = weight × prediction_error
-    "use_focal_loss": True,  # Alternative to weighted BCE for extreme imbalance. Sets a dynamic weight based on model's confidence.
-    "focal_gamma": 2.5,  # Adjusts the time the model focuses on hard examples vs easy ones
-    # gamma = 0    → All examples equal (regular cross-entropy)
-    # gamma = 0.5  → Slight focus on errors
-    # gamma = 1.0  → Moderate focus
-    # gamma = 2.0  → Standard focal loss (most common)
-    # gamma = 2.5  → Aggressive focusing (good for extreme imbalance)
-    # gamma = 3.0  → Very aggressive (might underfit)
-    # gamma = 5.0  → Extreme (probably too much)
+    # Dropout settings
+    "dropout": 0.1,
+    "attention_dropout": 0.1,
 
-    # Teacher forcing (during training) -
-    "teacher_forcing_ratio": 0.7,  # Probability of using true labels vs predictions
-    # We might want to add gradual reduction for teacher forcing. We Start high (.8) and decrease over epochs (.5 - .3)
+    # Loss settings
+    "use_weighted_loss": False,
+    "use_focal_loss": False,
+    "focal_gamma": 0,
+    "teacher_forcing_ratio": 0,
 }
 
 # -------------------------------------------------------------------------
-# LABEL STRUCTURE (Sublabels can be commented out to ignore)
+# LABEL STRUCTURE
 # -------------------------------------------------------------------------
 LABEL_STRUCTURE = {
     "EVENT": {
@@ -110,19 +99,17 @@ LABEL_STRUCTURE = {
         "sublabels": [
             "EVENT_Illness",
             "EVENT_Accident",
-            # "EVENT_Other"
+            "EVENT_Other"
         ],
         "enabled": True
     },
     "CAUSE": {
         "main_label": "CAUSE",
         "sublabels": [
-            # "CAUSE_Just_Happens",
             "CAUSE_Material_Physical",
             "CAUSE_Spirits_Gods",
             "CAUSE_Witchcraft_Sorcery",
             "CAUSE_Rule_Violation_Taboo",
-            # "CAUSE_Other"
         ],
         "enabled": True
     },
@@ -131,57 +118,62 @@ LABEL_STRUCTURE = {
         "sublabels": [
             "ACTION_Physical_Material",
             "ACTION_Technical_Specialist",
-            # "ACTION_Divination",
+            "ACTION_Divination",
             "ACTION_Shaman_Medium_Healer",
-            # "ACTION_Priest_High_Religion",
-            # "ACTION_Other"
+            "ACTION_Priest_High_Religion",
         ],
         "enabled": True
     }
 }
 
-# "Other" sublabels could fill up with heterogeneous examples making it hard for the model to learn consistent patterns
-
 # -------------------------------------------------------------------------
 # TRAINING PARAMETERS
 # -------------------------------------------------------------------------
-
 TRAINING_CONFIG = {
-    "num_epochs": 15, # How many times to see the entire dataset; Too few = underlearning, too many = memorizing the noise
-    "batch_size": 16, # Passages processed together - larger is more stable but needs more memory
-    "gradient_accumulation_steps": 1, # Update weights every X batches (this has a multiplier effect on batch size - we could try "batch_size": 8 & "gradient_accumulation_steps": 2
-    "learning_rate": 2e-5, # How big steps to take (0.00002), slower steps are probably best for the noisy data
-    "warmup_steps": 500, # Gentle start for 500 steps, This prevents wild adjustments early on - but we could increase to 700-1000 with a golden data set
-    "weight_decay": 0.01, # this prevents overfitting with a penalty for large weights. We could try .02
-    "max_length": 512, # token length (limit for the models we are using)
-    "eval_steps": 100, # Check performance every X steps
-    "save_steps": 500, # Save model checkpoint
-    "logging_steps": 50, # Write to logs
-    "early_stopping_patience": 3, # Stop if no improvement for X evaluation rounds
-    "label_smoothing": 0.1,  # Helps avoid overconfident predictions by adding a percentage of doubt (Label says EVENT=1 → Model learns EVENT=0.9; Label says EVENT=0 → Model learns EVENT=0.1) This will help with noisy data that may have incorrect or inconsistent labels.
+    "num_epochs": 15,
+    "batch_size": 16,
+    "gradient_accumulation_steps": 1,
+    "learning_rate": 2e-05,
+    "warmup_steps": 500,
+    "weight_decay": 0.01,
+    "max_length": 512,
+    "eval_steps": 100,
+    "save_steps": 500,
+    "logging_steps": 50,
+    "early_stopping_patience": 5,
+    "label_smoothing": 0.0,
+}
+
+# -------------------------------------------------------------------------
+# K-FOLD CROSS-VALIDATION PARAMETERS
+# -------------------------------------------------------------------------
+KFOLD_CONFIG = {
+    "use_kfold": False,
+    "n_splits": 5,
+    "current_fold": None,
 }
 
 # -------------------------------------------------------------------------
 # DATA PARAMETERS
 # -------------------------------------------------------------------------
 DATA_CONFIG = {
-    "excel_path": "_Altogether_Dataset_RACoded_Combined.xlsx", # source of training data
-    "test_size": 0.2, # percentage of data set reserved for final testing
-    "validation_size": 0.1,  # percentage of data used to stop training and detect overfitting
-    "random_seed": 42, # the answer to the ultimate question of life, the universe, and everything - Don't Change This!
-    "stratify_by": "EVENT",  # Which main label to stratify split by (EVENT is the most common label - but we could also try multilabel stratification: ["EVENT", "CAUSE", "ACTION"]; or even by a rare label [stratify_by": "CAUSE_Witchcraft_Sorcery"]. We might even consider a custom stratification that all labels appear in each split. I don't think Scikit-learn supports this.
+    "excel_path": "data/_Altogether_Dataset_RACoded_Combined.xlsx",
+    "test_size": 0.2,
+    "validation_size": 0.1,
+    "random_seed": 42,
+    "stratify_by": "EVENT",
 }
 
-print("Configuration loaded successfully!")
-print(f"Hierarchy: {'ENABLED' if CONFIG['use_hierarchy'] else 'DISABLED'}")
-print(f"Gated: {'YES' if CONFIG['gated_hierarchy'] else 'NO'}")
-print(f"Base Model: {CONFIG['base_model']}")
+print("Configuration loaded!")
+print(f"Main Label Prediction: {'ENABLED' if CONFIG['predict_main_labels'] else 'DISABLED'}")
+print(f"K-Fold Cross-Validation: {'ENABLED' if KFOLD_CONFIG['use_kfold'] else 'DISABLED'}")
+print(f"Training Epochs: {TRAINING_CONFIG['num_epochs']}")
 #%%
 # ============================================================================
-# CELL 3: CALCULATE LABEL DIMENSIONS
+# CELL 3: CALCULATE LABEL DIMENSIONS (UPDATED)
 # ============================================================================
 
-def calculate_label_dimensions(label_structure):
+def calculate_label_dimensions(label_structure, predict_main_labels=True):
     """Calculate the number of labels for each category"""
     dims = {
         "num_main_labels": 0,
@@ -195,16 +187,15 @@ def calculate_label_dimensions(label_structure):
 
     current_idx = 0
 
-    # Process each category
-    for category, info in label_structure.items():
-        if not info["enabled"]:
-            continue
-
-        # Main label
-        dims["num_main_labels"] += 1
-        dims["label_indices"][info["main_label"]] = current_idx
-        dims["label_names"].append(info["main_label"])
-        current_idx += 1
+    # Main labels (only if enabled)
+    if predict_main_labels:
+        for category, info in label_structure.items():
+            if not info["enabled"]:
+                continue
+            dims["num_main_labels"] += 1
+            dims["label_indices"][info["main_label"]] = current_idx
+            dims["label_names"].append(info["main_label"])
+            current_idx += 1
 
     # Sublabels
     for category, info in label_structure.items():
@@ -227,7 +218,11 @@ def calculate_label_dimensions(label_structure):
 
     return dims
 
-LABEL_DIMS = calculate_label_dimensions(LABEL_STRUCTURE)
+LABEL_DIMS = calculate_label_dimensions(
+    LABEL_STRUCTURE,
+    predict_main_labels=CONFIG["predict_main_labels"]
+)
+
 print(f"Label dimensions calculated:")
 print(f"  Main labels: {LABEL_DIMS['num_main_labels']}")
 print(f"  Event sublabels: {LABEL_DIMS['num_event_labels']}")
@@ -236,7 +231,7 @@ print(f"  Action sublabels: {LABEL_DIMS['num_action_labels']}")
 print(f"  Total labels: {LABEL_DIMS['total_labels']}")
 #%%
 # ============================================================================
-# CELL 4: MODEL DEFINITION WITH HUGGING FACE COMPATIBILITY (UPDATED)
+# CELL 4: MODEL DEFINITION WITH MAIN LABEL CONTROL
 # ============================================================================
 
 from transformers import AutoModel, AutoConfig
@@ -261,6 +256,7 @@ class ConfigurableHierarchicalConfig(PretrainedConfig):
         use_focal_loss=True,
         focal_gamma=2.5,
         teacher_forcing_ratio=0.7,
+        predict_main_labels=True,  # NEW parameter
         num_main_labels=3,
         num_event_labels=2,
         num_cause_labels=4,
@@ -288,6 +284,9 @@ class ConfigurableHierarchicalConfig(PretrainedConfig):
         self.use_focal_loss = use_focal_loss
         self.focal_gamma = focal_gamma
         self.teacher_forcing_ratio = teacher_forcing_ratio
+
+        # NEW: Control main label prediction
+        self.predict_main_labels = predict_main_labels
 
         # Label dimensions
         self.num_main_labels = num_main_labels
@@ -318,15 +317,18 @@ class ConfigurableHierarchicalModel(PreTrainedModel):
         if hasattr(config, 'attention_dropout') and config.attention_dropout > 0:
             self.encoder.config.attention_probs_dropout_prob = config.attention_dropout
 
-        # Main classifiers (always present)
-        self.main_classifier = nn.Linear(config.hidden_size, config.num_main_labels)
+        # Main classifiers (ONLY if predict_main_labels is True)
+        if config.predict_main_labels and config.num_main_labels > 0:
+            self.main_classifier = nn.Linear(config.hidden_size, config.num_main_labels)
+        else:
+            self.main_classifier = None
 
         # Build sublabel classifiers based on configuration
-        if config.use_hierarchy:
+        if config.use_hierarchy and config.predict_main_labels:
             # Hierarchical: sublabels depend on main labels
             hierarchical_input_size = config.hidden_size + config.num_main_labels
         else:
-            # Non-hierarchical: sublabels independent
+            # Non-hierarchical or no main labels: sublabels independent
             hierarchical_input_size = config.hidden_size
 
         # Create sublabel classifiers with configurable depth
@@ -358,6 +360,7 @@ class ConfigurableHierarchicalModel(PreTrainedModel):
         self.use_hierarchy = config.use_hierarchy
         self.gated_hierarchy = config.gated_hierarchy
         self.gate_threshold = config.gate_threshold
+        self.predict_main_labels = config.predict_main_labels
 
         # Initialize weights
         self.post_init()
@@ -404,20 +407,24 @@ class ConfigurableHierarchicalModel(PreTrainedModel):
         # Pool the outputs
         pooled_output = encoder_outputs.last_hidden_state[:, 0]
 
-        # Get main predictions
-        main_logits = self.main_classifier(pooled_output)
+        # Get main predictions (only if enabled)
+        if self.main_classifier is not None:
+            main_logits = self.main_classifier(pooled_output)
 
-        if self.use_hierarchy:
-            # Use main predictions for sublabel input
-            if teacher_forcing and labels is not None:
-                # During training, sometimes use true labels
-                main_probs = labels[:, :self.config.num_main_labels].float()
+            if self.use_hierarchy:
+                # Use main predictions for sublabel input
+                if teacher_forcing and labels is not None:
+                    main_probs = labels[:, :self.config.num_main_labels].float()
+                else:
+                    main_probs = torch.sigmoid(main_logits)
+
+                hierarchical_input = torch.cat([pooled_output, main_probs], dim=1)
             else:
-                main_probs = torch.sigmoid(main_logits)
-
-            hierarchical_input = torch.cat([pooled_output, main_probs], dim=1)
+                # Non-hierarchical: use only pooled output
+                hierarchical_input = pooled_output
         else:
-            # Non-hierarchical: use only pooled output
+            # No main labels - use pooled output directly
+            main_logits = torch.zeros(pooled_output.shape[0], 0).to(pooled_output.device)
             hierarchical_input = pooled_output
 
         # Get sublabel predictions
@@ -425,8 +432,8 @@ class ConfigurableHierarchicalModel(PreTrainedModel):
         cause_logits = self.cause_classifier(hierarchical_input) if self.cause_classifier else torch.zeros(main_logits.shape[0], 0).to(main_logits.device)
         action_logits = self.action_classifier(hierarchical_input) if self.action_classifier else torch.zeros(main_logits.shape[0], 0).to(main_logits.device)
 
-        # Apply gating if configured
-        if self.gated_hierarchy and self.use_hierarchy:
+        # Apply gating if configured (only if we have main labels)
+        if self.gated_hierarchy and self.use_hierarchy and self.main_classifier is not None:
             main_probs = torch.sigmoid(main_logits)
 
             # Gate EVENT sublabels
@@ -456,10 +463,15 @@ class ConfigurableHierarchicalModel(PreTrainedModel):
                 )
                 action_logits = action_logits * action_gate
 
-        # Concatenate all logits
-        logits = torch.cat([
-            main_logits, event_logits, cause_logits, action_logits
-        ], dim=1)
+        # Concatenate all logits (only include main_logits if they exist)
+        if self.main_classifier is not None:
+            logits = torch.cat([
+                main_logits, event_logits, cause_logits, action_logits
+            ], dim=1)
+        else:
+            logits = torch.cat([
+                event_logits, cause_logits, action_logits
+            ], dim=1)
 
         # Calculate loss if labels provided
         loss = None
@@ -658,6 +670,78 @@ df_clean, label_columns, class_weights = load_and_preprocess_data(
 print(f"\nClass weights calculated (for weighted loss)")
 #%%
 # ============================================================================
+# CELL 7A: K-FOLD CROSS-VALIDATION SETUP
+# ============================================================================
+
+from sklearn.model_selection import StratifiedKFold
+import numpy as np
+
+def create_kfold_splits(df_clean, label_columns, kfold_config, data_config):
+    """Create K-fold cross-validation splits"""
+
+    if not kfold_config["use_kfold"]:
+        # Return None to indicate standard split should be used
+        return None
+
+    print(f"Creating {kfold_config['n_splits']}-fold cross-validation splits...")
+
+    # Use stratification based on the specified column
+    stratify_col = data_config.get("stratify_by", None)
+    if stratify_col and stratify_col in df_clean.columns:
+        stratify_array = df_clean[stratify_col].values
+    else:
+        stratify_array = None
+
+    # Create K-fold splitter
+    if stratify_array is not None:
+        kfold = StratifiedKFold(
+            n_splits=kfold_config["n_splits"],
+            shuffle=True,
+            random_state=data_config["random_seed"]
+        )
+        splits = list(kfold.split(df_clean, stratify_array))
+    else:
+        from sklearn.model_selection import KFold
+        kfold = KFold(
+            n_splits=kfold_config["n_splits"],
+            shuffle=True,
+            random_state=data_config["random_seed"]
+        )
+        splits = list(kfold.split(df_clean))
+
+    print(f"Created {len(splits)} folds")
+
+    # Convert splits to datasets
+    fold_datasets = []
+    for fold_idx, (train_idx, val_idx) in enumerate(splits):
+        train_df = df_clean.iloc[train_idx].reset_index(drop=True)
+        val_df = df_clean.iloc[val_idx].reset_index(drop=True)
+
+        train_dataset = Dataset.from_pandas(train_df)
+        val_dataset = Dataset.from_pandas(val_df)
+
+        fold_datasets.append({
+            'fold': fold_idx + 1,
+            'train': train_dataset,
+            'val': val_dataset,
+            'train_size': len(train_df),
+            'val_size': len(val_df)
+        })
+
+        print(f"  Fold {fold_idx + 1}: {len(train_df)} train, {len(val_df)} val")
+
+    return fold_datasets
+
+# Create folds or standard split
+kfold_splits = create_kfold_splits(df_clean, label_columns, KFOLD_CONFIG, DATA_CONFIG)
+
+if kfold_splits is None:
+    print("\nUsing standard train/val/test split")
+    # Use the original create_data_splits function
+else:
+    print(f"\nUsing K-fold cross-validation with {len(kfold_splits)} folds")
+#%%
+# ============================================================================
 # CELL 7: CREATE TRAIN/VAL/TEST SPLITS
 # ============================================================================
 
@@ -852,52 +936,105 @@ def compute_metrics(eval_pred):
     return compute_detailed_metrics(eval_pred, label_columns)
 #%%
 # ============================================================================
-# CELL 11: INITIALIZE MODEL
+# CELL 11: TRAINING WITH K-FOLD CROSS-VALIDATION SUPPORT
 # ============================================================================
 
-# Create model configuration using the calculated dimensions
-model_config = ConfigurableHierarchicalConfig(
-    base_model=CONFIG["base_model"],
-    use_hierarchy=CONFIG["use_hierarchy"],
-    gated_hierarchy=CONFIG["gated_hierarchy"],
-    gate_threshold=CONFIG["gate_threshold"],
-    hidden_size=CONFIG["hidden_size"],
-    hierarchical_hidden_size=CONFIG["hierarchical_hidden_size"],
-    num_hidden_layers=CONFIG["num_hidden_layers"],
-    dropout=CONFIG["dropout"],
-    attention_dropout=CONFIG["attention_dropout"],
-    use_weighted_loss=CONFIG["use_weighted_loss"],
-    use_focal_loss=CONFIG["use_focal_loss"],
-    focal_gamma=CONFIG["focal_gamma"],
-    teacher_forcing_ratio=CONFIG["teacher_forcing_ratio"],
-    num_main_labels=LABEL_DIMS["num_main_labels"],
-    num_event_labels=LABEL_DIMS["num_event_labels"],
-    num_cause_labels=LABEL_DIMS["num_cause_labels"],
-    num_action_labels=LABEL_DIMS["num_action_labels"],
-    total_labels=LABEL_DIMS["total_labels"],
-    label_indices=LABEL_DIMS["label_indices"],
-    label_names=LABEL_DIMS["label_names"]
-)
+def train_single_fold(fold_data, fold_num, tokenizer, output_dir):
+    """Train a single fold and return results"""
 
-# Initialize model
-model = ConfigurableHierarchicalModel(model_config)
-model = model.to(device)
+    print(f"\n{'='*60}")
+    print(f"TRAINING FOLD {fold_num}/{KFOLD_CONFIG['n_splits']}")
+    print(f"{'='*60}")
 
-# Count parameters
-total_params = sum(p.numel() for p in model.parameters())
-trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # Create output directory for this fold
+    fold_output_dir = f"{output_dir}/fold_{fold_num}"
+    os.makedirs(fold_output_dir, exist_ok=True)
 
-print(f"Model initialized!")
-print(f"  Total parameters: {total_params:,}")
-print(f"  Trainable parameters: {trainable_params:,}")
-print(f"  Hierarchy: {'ENABLED' if CONFIG['use_hierarchy'] else 'DISABLED'}")
-print(f"  Gated: {'YES' if CONFIG['gated_hierarchy'] else 'NO'}")
-#%%
-# ============================================================================
-# CELL 12: TRAINING CONFIGURATION (UPDATED)
-# ============================================================================
+    # Initialize model for this fold
+    model_config = ConfigurableHierarchicalConfig(
+        base_model=CONFIG["base_model"],
+        use_hierarchy=CONFIG["use_hierarchy"],
+        gated_hierarchy=CONFIG["gated_hierarchy"],
+        gate_threshold=CONFIG["gate_threshold"],
+        hidden_size=CONFIG["hidden_size"],
+        hierarchical_hidden_size=CONFIG["hierarchical_hidden_size"],
+        num_hidden_layers=CONFIG["num_hidden_layers"],
+        dropout=CONFIG["dropout"],
+        attention_dropout=CONFIG["attention_dropout"],
+        use_weighted_loss=CONFIG["use_weighted_loss"],
+        use_focal_loss=CONFIG["use_focal_loss"],
+        focal_gamma=CONFIG["focal_gamma"],
+        teacher_forcing_ratio=CONFIG["teacher_forcing_ratio"],
+        predict_main_labels=CONFIG["predict_main_labels"],
+        num_main_labels=LABEL_DIMS["num_main_labels"],
+        num_event_labels=LABEL_DIMS["num_event_labels"],
+        num_cause_labels=LABEL_DIMS["num_cause_labels"],
+        num_action_labels=LABEL_DIMS["num_action_labels"],
+        total_labels=LABEL_DIMS["total_labels"],
+        label_indices=LABEL_DIMS["label_indices"],
+        label_names=LABEL_DIMS["label_names"]
+    )
 
-# Generate output directory name based on experiment configuration
+    fold_model = ConfigurableHierarchicalModel(model_config).to(device)
+
+    # Training arguments
+    fold_training_args = TrainingArguments(
+        output_dir=fold_output_dir,
+        num_train_epochs=TRAINING_CONFIG["num_epochs"],
+        per_device_train_batch_size=TRAINING_CONFIG["batch_size"],
+        per_device_eval_batch_size=TRAINING_CONFIG["batch_size"],
+        gradient_accumulation_steps=TRAINING_CONFIG["gradient_accumulation_steps"],
+        warmup_steps=TRAINING_CONFIG["warmup_steps"],
+        weight_decay=TRAINING_CONFIG["weight_decay"],
+        learning_rate=TRAINING_CONFIG["learning_rate"],
+        logging_dir=f'{fold_output_dir}/logs',
+        logging_steps=TRAINING_CONFIG["logging_steps"],
+        eval_strategy="steps",
+        eval_steps=TRAINING_CONFIG["eval_steps"],
+        save_strategy="steps",
+        save_steps=TRAINING_CONFIG["save_steps"],
+        save_total_limit=2,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_f1_micro",
+        greater_is_better=True,
+        report_to="none",
+        fp16=torch.cuda.is_available(),
+        label_smoothing_factor=TRAINING_CONFIG["label_smoothing"],
+        remove_unused_columns=False,
+    )
+
+    # Initialize trainer
+    fold_trainer = HierarchicalTrainer(
+        model=fold_model,
+        args=fold_training_args,
+        train_dataset=fold_data['train'],
+        eval_dataset=fold_data['val'],
+        tokenizer=tokenizer,
+        data_collator=DataCollatorWithPadding(tokenizer),
+        compute_metrics=compute_metrics,
+        class_weights=class_weights if CONFIG["use_weighted_loss"] else None,
+        teacher_forcing_ratio=CONFIG["teacher_forcing_ratio"],
+    )
+
+    # Train
+    print(f"\nStarting training for fold {fold_num}...")
+    fold_trainer.train()
+
+    # Evaluate on validation set
+    print(f"\nEvaluating fold {fold_num}...")
+    fold_results = fold_trainer.evaluate()
+
+    # Save fold-specific results
+    with open(f"{fold_output_dir}/results.json", "w") as f:
+        json.dump({k: float(v) if isinstance(v, (np.float32, np.float64)) else v
+                   for k, v in fold_results.items()}, f, indent=2)
+
+    print(f"\n📊 Fold {fold_num} Results:")
+    print(f"  F1 Micro: {fold_results['eval_f1_micro']:.4f}")
+    print(f"  F1 Macro: {fold_results['eval_f1_macro']:.4f}")
+
+    return fold_results, fold_model, fold_trainer
+
 def generate_output_dir_name():
     """Generate output directory name based on experiment settings"""
 
@@ -950,78 +1087,213 @@ os.makedirs(output_dir, exist_ok=True)
 
 print(f"Output directory: {output_dir}")
 
-# Save experiment configuration to the output directory immediately
-experiment_info = {
-    "experiment_name": EXPERIMENT_CONFIG.get("experiment_name", "unnamed"),
-    "auto_generated_name": EXPERIMENT_CONFIG.get("auto_name", False),
-    "output_dir": output_dir,
-    "timestamp": datetime.now().isoformat(),
-    "config": CONFIG,
-    "training_config": TRAINING_CONFIG,
-    "data_config": DATA_CONFIG,
-    "label_structure": LABEL_STRUCTURE
-}
 
-with open(f"{output_dir}/experiment_info.json", "w") as f:
-    json.dump(experiment_info, f, indent=2)
-
-print(f"Experiment configuration saved to: {output_dir}/experiment_info.json")
-
-# Rest of the training configuration remains the same
-training_args = TrainingArguments(
-    output_dir=output_dir,
-    num_train_epochs=TRAINING_CONFIG["num_epochs"],
-    per_device_train_batch_size=TRAINING_CONFIG["batch_size"],
-    per_device_eval_batch_size=TRAINING_CONFIG["batch_size"],
-    gradient_accumulation_steps=TRAINING_CONFIG["gradient_accumulation_steps"],
-    warmup_steps=TRAINING_CONFIG["warmup_steps"],
-    weight_decay=TRAINING_CONFIG["weight_decay"],
-    learning_rate=TRAINING_CONFIG["learning_rate"],
-    logging_dir=f'{output_dir}/logs',
-    logging_steps=TRAINING_CONFIG["logging_steps"],
-    eval_strategy="steps",
-    eval_steps=TRAINING_CONFIG["eval_steps"],
-    save_strategy="steps",
-    save_steps=TRAINING_CONFIG["save_steps"],
-    save_total_limit=3,
-    load_best_model_at_end=True,
-    metric_for_best_model="eval_f1_micro",
-    greater_is_better=True,
-    report_to="none",
-    fp16=torch.cuda.is_available(),
-    label_smoothing_factor=TRAINING_CONFIG["label_smoothing"],
-    remove_unused_columns=False,
-)
-
-# Initialize trainer
-trainer = HierarchicalTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=train_dataset,
-    eval_dataset=val_dataset,
-    tokenizer=tokenizer,
-    data_collator=DataCollatorWithPadding(tokenizer),
-    compute_metrics=compute_metrics,
-    class_weights=class_weights if CONFIG["use_weighted_loss"] else None,
-    teacher_forcing_ratio=CONFIG["teacher_forcing_ratio"],
-)
-
-print(f"Trainer configured!")
-print(f"  Output directory: {output_dir}")
-print(f"  Training for {TRAINING_CONFIG['num_epochs']} epochs")
-#%%
 # ============================================================================
-# CELL 13: TRAIN THE MODEL
+# MAIN TRAINING LOGIC
 # ============================================================================
 
-print("=" * 60)
-print("STARTING TRAINING")
-print("=" * 60)
+if kfold_splits is not None and KFOLD_CONFIG["use_kfold"]:
+    # ========================================================================
+    # K-FOLD CROSS-VALIDATION TRAINING
+    # ========================================================================
 
-# Train
-trainer.train()
+    print("\n" + "="*60)
+    print("STARTING K-FOLD CROSS-VALIDATION TRAINING")
+    print("="*60)
 
-print("\n✅ Training completed!")
+    all_fold_results = []
+    fold_models = []
+
+    # Determine which folds to run
+    if KFOLD_CONFIG["current_fold"] is not None:
+        folds_to_run = [KFOLD_CONFIG["current_fold"] - 1]  # Convert to 0-indexed
+        print(f"Running only fold {KFOLD_CONFIG['current_fold']}")
+    else:
+        folds_to_run = range(len(kfold_splits))
+        print(f"Running all {len(kfold_splits)} folds")
+
+    for fold_idx in folds_to_run:
+        fold_data = kfold_splits[fold_idx]
+
+        print(f"\n{'='*60}")
+        print(f"PREPARING FOLD {fold_data['fold']} DATA")
+        print(f"{'='*60}")
+
+        # Tokenize this fold's data
+        fold_train = fold_data['train'].map(tokenize_function, batched=True)
+        fold_val = fold_data['val'].map(tokenize_function, batched=True)
+
+        # Prepare labels
+        fold_train = fold_train.map(lambda x: prepare_labels(x, label_columns), batched=True)
+        fold_val = fold_val.map(lambda x: prepare_labels(x, label_columns), batched=True)
+
+        # Remove unnecessary columns
+        columns_to_remove = ['passage', 'ID'] + label_columns
+        fold_train = fold_train.remove_columns([col for col in columns_to_remove if col in fold_train.column_names])
+        fold_val = fold_val.remove_columns([col for col in columns_to_remove if col in fold_val.column_names])
+
+        # Set format
+        fold_train.set_format('torch')
+        fold_val.set_format('torch')
+
+        fold_data_processed = {
+            'train': fold_train,
+            'val': fold_val,
+            'fold': fold_data['fold']
+        }
+
+        # Train this fold
+        fold_results, fold_model, fold_trainer = train_single_fold(
+            fold_data_processed,
+            fold_data['fold'],
+            tokenizer,
+            output_dir
+        )
+
+        all_fold_results.append({
+            'fold': fold_data['fold'],
+            'results': fold_results
+        })
+        fold_models.append({
+            'fold': fold_data['fold'],
+            'model': fold_model,
+            'trainer': fold_trainer
+        })
+
+    # Calculate and display average metrics across folds
+    if len(all_fold_results) > 1:
+        print(f"\n{'='*60}")
+        print("AVERAGE RESULTS ACROSS ALL FOLDS")
+        print(f"{'='*60}\n")
+
+        avg_metrics = {}
+        std_metrics = {}
+
+        # Get all metric names from first fold
+        metric_names = [k for k in all_fold_results[0]['results'].keys() if k.startswith('eval_')]
+
+        for metric_name in metric_names:
+            values = [fold['results'][metric_name] for fold in all_fold_results]
+            avg_metrics[metric_name] = float(np.mean(values))
+            std_metrics[metric_name] = float(np.std(values))
+
+        # Display key metrics
+        print(f"F1 Micro:  {avg_metrics['eval_f1_micro']:.4f} (±{std_metrics['eval_f1_micro']:.4f})")
+        print(f"F1 Macro:  {avg_metrics['eval_f1_macro']:.4f} (±{std_metrics['eval_f1_macro']:.4f})")
+        if 'eval_f1_main_avg' in avg_metrics:
+            print(f"Main Avg:  {avg_metrics['eval_f1_main_avg']:.4f} (±{std_metrics['eval_f1_main_avg']:.4f})")
+
+        # Save detailed average results
+        avg_results_detailed = {
+            'averages': avg_metrics,
+            'std_deviations': std_metrics,
+            'individual_folds': all_fold_results
+        }
+
+        with open(f"{output_dir}/kfold_average_results.json", "w") as f:
+            json.dump(avg_results_detailed, f, indent=2)
+
+        print(f"\n✅ K-fold results saved to: {output_dir}/kfold_average_results.json")
+
+    # Use the last fold's model and trainer for subsequent cells
+    model = fold_models[-1]['model']
+    trainer = fold_models[-1]['trainer']
+
+    print(f"\n✅ K-fold training completed!")
+    print(f"Using fold {fold_models[-1]['fold']} model for final evaluation")
+
+else:
+    # ========================================================================
+    # STANDARD TRAINING (NO K-FOLD)
+    # ========================================================================
+
+    print("\n" + "="*60)
+    print("STARTING STANDARD TRAINING (NO K-FOLD)")
+    print("="*60)
+
+    # Initialize model
+    model_config = ConfigurableHierarchicalConfig(
+        base_model=CONFIG["base_model"],
+        use_hierarchy=CONFIG["use_hierarchy"],
+        gated_hierarchy=CONFIG["gated_hierarchy"],
+        gate_threshold=CONFIG["gate_threshold"],
+        hidden_size=CONFIG["hidden_size"],
+        hierarchical_hidden_size=CONFIG["hierarchical_hidden_size"],
+        num_hidden_layers=CONFIG["num_hidden_layers"],
+        dropout=CONFIG["dropout"],
+        attention_dropout=CONFIG["attention_dropout"],
+        use_weighted_loss=CONFIG["use_weighted_loss"],
+        use_focal_loss=CONFIG["use_focal_loss"],
+        focal_gamma=CONFIG["focal_gamma"],
+        teacher_forcing_ratio=CONFIG["teacher_forcing_ratio"],
+        predict_main_labels=CONFIG["predict_main_labels"],
+        num_main_labels=LABEL_DIMS["num_main_labels"],
+        num_event_labels=LABEL_DIMS["num_event_labels"],
+        num_cause_labels=LABEL_DIMS["num_cause_labels"],
+        num_action_labels=LABEL_DIMS["num_action_labels"],
+        total_labels=LABEL_DIMS["total_labels"],
+        label_indices=LABEL_DIMS["label_indices"],
+        label_names=LABEL_DIMS["label_names"]
+    )
+
+    model = ConfigurableHierarchicalModel(model_config)
+    model = model.to(device)
+
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print(f"Model initialized!")
+    print(f"  Total parameters: {total_params:,}")
+    print(f"  Trainable parameters: {trainable_params:,}")
+
+    # Training arguments
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        num_train_epochs=TRAINING_CONFIG["num_epochs"],
+        per_device_train_batch_size=TRAINING_CONFIG["batch_size"],
+        per_device_eval_batch_size=TRAINING_CONFIG["batch_size"],
+        gradient_accumulation_steps=TRAINING_CONFIG["gradient_accumulation_steps"],
+        warmup_steps=TRAINING_CONFIG["warmup_steps"],
+        weight_decay=TRAINING_CONFIG["weight_decay"],
+        learning_rate=TRAINING_CONFIG["learning_rate"],
+        logging_dir=f'{output_dir}/logs',
+        logging_steps=TRAINING_CONFIG["logging_steps"],
+        eval_strategy="steps",
+        eval_steps=TRAINING_CONFIG["eval_steps"],
+        save_strategy="steps",
+        save_steps=TRAINING_CONFIG["save_steps"],
+        save_total_limit=3,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_f1_micro",
+        greater_is_better=True,
+        report_to="none",
+        fp16=torch.cuda.is_available(),
+        label_smoothing_factor=TRAINING_CONFIG["label_smoothing"],
+        remove_unused_columns=False,
+    )
+
+    # Initialize trainer
+    trainer = HierarchicalTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        tokenizer=tokenizer,
+        data_collator=DataCollatorWithPadding(tokenizer),
+        compute_metrics=compute_metrics,
+        class_weights=class_weights if CONFIG["use_weighted_loss"] else None,
+        teacher_forcing_ratio=CONFIG["teacher_forcing_ratio"],
+    )
+
+    print(f"\nTrainer configured!")
+    print(f"  Training for {TRAINING_CONFIG['num_epochs']} epochs")
+
+    # Train
+    print("\nStarting training...")
+    trainer.train()
+
+    print("\n✅ Training completed!")
 #%%
 # ============================================================================
 # CELL 14: EVALUATE ON TEST SET
@@ -1311,7 +1583,6 @@ def predict_passage(text, model, tokenizer, label_names, thresholds=None):
     return predictions, prob_dict
 
 # Test the inference function
-# FIX: Use loaded_model instead of model (which was deleted in Cell 18)
 test_text = "He was cursed by the forest spirits and his leg wouldn't heal until he went to the shaman."
 predictions, probabilities = predict_passage(
     test_text,
