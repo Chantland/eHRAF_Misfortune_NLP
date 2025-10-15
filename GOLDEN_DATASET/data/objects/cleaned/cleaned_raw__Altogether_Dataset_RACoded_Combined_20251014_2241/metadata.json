@@ -1,6 +1,6 @@
 {
-  "name": "raw__Altogether_Dataset_RACoded_Combined_20251011",
-  "stage": "raw",
+  "name": "cleaned_raw__Altogether_Dataset_RACoded_Combined_20251014_2241",
+  "stage": "cleaned",
   "passage_col": "Passage",
   "label_columns": [
     "Illness",
@@ -17,7 +17,6 @@
     "Priest_High_Religion"
   ],
   "metadata_columns": [
-    "Unnamed: 0",
     "Passage Number",
     "Region",
     "SubRegion",
@@ -49,15 +48,19 @@
     "Dataset",
     "Info"
   ],
-  "parent": null,
-  "created_at": "2025-10-11T09:04:32.080105",
-  "namespace": "raw__altogether_dataset_racoded_combined_20251011",
+  "parent": "raw__Altogether_Dataset_RACoded_Combined_20251014",
+  "created_at": "2025-10-14T22:41:27.802564",
+  "namespace": "raw__altogether_dataset_racoded_combined_20251014",
   "has_embeddings": false,
   "has_scores": false,
-  "num_passages": 11006,
+  "num_passages": 10388,
   "metadata": {
-    "source_file": "_Altogether_Dataset_RACoded_Combined.xlsx",
-    "header_row": 1
+    "cleaning_steps": [
+      "remove_missing",
+      "remove_duplicates"
+    ],
+    "removed_passages": 618
   },
-  "directory": "data/objects/raw/raw__Altogether_Dataset_RACoded_Combined_20251011"
+  "embedding_format": "stable_id_to_pinecone",
+  "directory": "data/objects/cleaned/cleaned_raw__Altogether_Dataset_RACoded_Combined_20251014_2241"
 }
