@@ -256,7 +256,7 @@ class GlobalChatAssistant:
                     {"text": "Show label distribution", "query": "Show me the label distribution in my dataset"},
                 ]
 
-                if 'passage_id_map' not in cache:
+                if 'stable_id_to_pinecone' not in cache:
                     suggestions.append(
                         {"text": "Generate embeddings", "query": "Help me generate embeddings for my data"}
                     )
@@ -287,7 +287,7 @@ class GlobalChatAssistant:
         elif "🔍 Discover" in current_page:
             cache = session_state.get('cache', {})
 
-            if 'passage_id_map' in cache:
+            if 'stable_id_to_pinecone' in cache:
                 suggestions = [
                     {"text": "Search for shamans", "query": "Find passages about shamans healing illness"},
                     {"text": "Test a hypothesis", "query": "Test if spirits cause illness more than material causes"},
@@ -937,10 +937,50 @@ class GlobalChatAssistant:
         """Action: Create training tiers"""
         return f"Tier creation queued (preset={preset})"
 
-    def _action_semantic_search(self, session_state: Dict, query: str, top_k: int = 10, label_filter: str = None) -> str:
-        """Action: Semantic search"""
-        # Would actually perform search and display results
-        return f"Search completed for '{query}' (found {top_k} results)"
+    def _action_semantic_search(self, session_state: Dict, query: str, top_k: int = 10,
+                                label_filter: Optional[str] = None) -> str:
+        """Action: Semantic search with stable ID handling"""
+
+        finder = session_state.get('finder')
+        namespace = session_state.get('namespace', 'main')
+        df = session_state.get('df')
+
+        if finder is None:
+            return "❌ Finder not initialized"
+
+        try:
+            # Run search
+            results = finder.search_with_filters(
+                query=query,
+                namespace=namespace,
+                label_filter=label_filter,
+                top_k_vector=top_k * 2,
+                top_k_rerank=top_k,
+                min_similarity=0.0
+            )
+
+            # ✅ FIX: Map results back to current dataframe indices
+            mapped_results = []
+            for result in results:
+                stable_id = result.get('metadata', {}).get('stable_id')
+
+                if stable_id and df is not None and 'passage_id' in df.columns:
+                    # Find current index for this stable ID
+                    matching = df[df['passage_id'] == stable_id]
+                    if not matching.empty:
+                        result['passage_idx'] = matching.index[0]
+                        mapped_results.append(result)
+                else:
+                    # Fallback to stored index
+                    mapped_results.append(result)
+
+            # Store in session state
+            session_state['search_results'] = mapped_results
+
+            return f"✅ Found {len(mapped_results)} results for '{query}'"
+
+        except Exception as e:
+            return f"❌ Search failed: {str(e)}"
 
     def _action_find_similar(self, session_state: Dict, passage_idx: int, k: int = 20) -> str:
         """Action: Find similar passages"""
@@ -975,35 +1015,3 @@ class GlobalChatAssistant:
 
         return " | ".join(parts)
 
-
-# ============================================================================
-# STANDALONE RENDER FUNCTION (backward compatibility)
-# ============================================================================
-
-def render_chat_page(session_state: Dict[str, Any]):
-    """
-    Render full-page chat interface (backward compatibility)
-
-    This maintains the original chat page functionality
-    """
-
-    st.markdown("## 💬 AI Assistant")
-
-    # Check if data loaded
-    if not session_state.get('initialized', False):
-        st.info("💡 Load a dataset first to enable full assistant capabilities")
-
-    # Initialize assistant
-    if 'chat_assistant' not in st.session_state:
-        try:
-            st.session_state['chat_assistant'] = GlobalChatAssistant()
-            st.success("✅ Claude Sonnet 4.5 with full access")
-        except ValueError as e:
-            st.error(f"❌ {e}")
-            st.info("Set ANTHROPIC_API_KEY in .env")
-            return
-
-    assistant = st.session_state['chat_assistant']
-
-    # Render in full-page mode
-    assistant.render("💬 Chat", dict(session_state))

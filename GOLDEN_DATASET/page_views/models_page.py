@@ -513,7 +513,7 @@ def render_comparison_section(manager: ModelManager):
                     return [''] * len(row)
 
             styled_df = comparison_df.style.apply(highlight_winner, axis=1)
-            st.dataframe(styled_df, hide_index=True, use_container_width=True)
+            st.dataframe(styled_df, hide_index=True, width='stretch')
 
             # Win/loss breakdown
             st.markdown("---")

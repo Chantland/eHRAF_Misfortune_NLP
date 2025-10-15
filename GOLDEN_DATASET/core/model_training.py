@@ -2,6 +2,7 @@
 Model Training Module for HRAF Golden Dataset Discovery
 Comprehensive training system with FIXED weighted focal loss implementation
 """
+import hashlib
 
 import streamlit as st
 import torch
@@ -22,6 +23,7 @@ from transformers import (
     AutoTokenizer,
     AutoModel,
     AutoConfig,
+    TrainerCallback
 )
 from datasets import Dataset
 from sklearn.model_selection import train_test_split
@@ -34,9 +36,69 @@ from core.model_inference import (
     HRAFModelLoader
 )
 
-# Import data utilities
-from core.data_preparation import DataExperiment
+class CurriculumLearningCallback(TrainerCallback):
+    """Switches dataset mid-training for curriculum learning"""
 
+    def __init__(self, switch_epoch, tier1_dataset, combined_dataset):
+        self.switch_epoch = switch_epoch
+        self.tier1_dataset = tier1_dataset
+        self.combined_dataset = combined_dataset
+        self.switched = False
+        self.trainer = None  # ✅ Will be set after trainer creation
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        """Check if we should switch datasets"""
+        current_epoch = int(state.epoch) if state.epoch else 0
+
+        if current_epoch >= self.switch_epoch and not self.switched:
+            print(f"\n🎓 CURRICULUM SWITCH: Moving from Tier 1 to Combined dataset (epoch {current_epoch})")
+            self.switched = True
+
+            # ✅ FIX: Access trainer from callback's stored reference
+            if self.trainer is not None:
+                self.trainer.train_dataset = self.combined_dataset
+                print(f"✅ Switched to combined dataset: {len(self.combined_dataset)} examples")
+            else:
+                print("⚠️ Warning: Trainer reference not set in callback")
+
+            return control
+
+
+class CurriculumEarlyStoppingCallback(TrainerCallback):
+    """Early stopping that pauses during curriculum transitions"""
+
+    def __init__(self, patience=3, threshold=0.001, curriculum_callback=None):
+        self.patience = patience
+        self.threshold = threshold
+        self.curriculum_callback = curriculum_callback
+        self.best_metric = None
+        self.epochs_without_improvement = 0
+
+    def on_evaluate(self, args, state, control, metrics, **kwargs):
+        current_metric = metrics.get("eval_f1_micro", 0)
+
+        # Don't apply early stopping right after curriculum switch
+        if self.curriculum_callback and self.curriculum_callback.switched:
+            switch_epoch = self.curriculum_callback.switch_epoch
+            current_epoch = int(state.epoch) if state.epoch else 0
+
+            # Give model 3 epochs to adjust after switch
+            if current_epoch < switch_epoch + 3:
+                return control
+
+        # Standard early stopping logic
+        if self.best_metric is None:
+            self.best_metric = current_metric
+        elif current_metric > self.best_metric + self.threshold:
+            self.best_metric = current_metric
+            self.epochs_without_improvement = 0
+        else:
+            self.epochs_without_improvement += 1
+
+        if self.epochs_without_improvement >= self.patience:
+            control.should_training_stop = True
+
+        return control
 
 # ============================================================================
 # TRAINING SESSION MANAGEMENT
@@ -190,7 +252,7 @@ class HierarchicalTrainer(Trainer):
 # ============================================================================
 
 def get_hraf_template() -> Dict:
-    """Standard HRAF misfortune classification hierarchy template"""
+    """Standard HRAF misfortune classification hierarchy template - COMPLETE"""
     return {
         'categories': {
             'EVENT': {
@@ -198,13 +260,22 @@ def get_hraf_template() -> Dict:
                 'enabled': True
             },
             'CAUSE': {
-                'sublabels': ['Material_Physical', 'Spirits_Gods',
-                             'Witchcraft_Sorcery', 'Rule_Violation_Taboo'],
+                'sublabels': [
+                    'Material_Physical',
+                    'Spirits_Gods',
+                    'Witchcraft_Sorcery',
+                    'Rule_Violation_Taboo'
+                ],
                 'enabled': True
             },
             'ACTION': {
-                'sublabels': ['Physical_Material', 'Technical_Specialist',
-                             'Divination', 'Shaman_Medium_Healer', 'Priest_High_Religion'],
+                'sublabels': [
+                    'Physical_Material',
+                    'Technical_Specialist',
+                    'Divination',
+                    'Shaman_Medium_Healer',
+                    'Priest_High_Religion',
+                ],
                 'enabled': True
             }
         }
@@ -463,10 +534,14 @@ def build_label_structure_from_hierarchy(
 
 
 def calculate_label_dimensions(
-    label_structure: Dict,
-    predict_main_labels: bool
+        label_structure: Dict,
+        predict_main_labels: bool
 ) -> Dict:
-    """Calculate the number of labels for each category"""
+    """
+    Calculate the number of labels for each category
+
+    For FLAT models, infers category from label names
+    """
 
     dims = {
         "num_main_labels": 0,
@@ -489,20 +564,27 @@ def calculate_label_dimensions(
                 dims["label_names"].append(info["main_label"])
                 current_idx += 1
 
-    # Sublabels - map to EVENT/CAUSE/ACTION for model architecture
+    # ✅ FIXED: Sublabel mapping
     for category, info in label_structure.items():
         if not info.get("enabled", True):
             continue
 
-        for sublabel in info["sublabels"]:
-            # Map category to model's expected structure
-            if category == "EVENT" or "event" in category.lower():
+        sublabels = info.get("sublabels", [])
+
+        if len(sublabels) == 0:
+            raise ValueError(
+                f"❌ Category '{category}' is enabled but has NO sublabels!"
+            )
+
+        for sublabel in sublabels:
+            # ✅ FIX: Determine category from sublabel NAME, not category name
+            target_category = _infer_label_category(sublabel, category)
+
+            if target_category == "EVENT":
                 dims["num_event_labels"] += 1
-            elif category == "CAUSE" or "cause" in category.lower():
+            elif target_category == "CAUSE":
                 dims["num_cause_labels"] += 1
-            elif category == "ACTION" or "action" in category.lower():
-                dims["num_action_labels"] += 1
-            else:
+            elif target_category == "ACTION":
                 dims["num_action_labels"] += 1
 
             dims["label_indices"][sublabel] = current_idx
@@ -511,8 +593,69 @@ def calculate_label_dimensions(
 
     dims["total_labels"] = current_idx
 
+    if dims["total_labels"] == 0:
+        raise ValueError("No labels configured! Check hierarchy configuration.")
+
     return dims
 
+
+def _infer_label_category(label_name: str, category_name: str) -> str:
+    """
+    Infer whether a label belongs to EVENT, CAUSE, or ACTION
+
+    Checks category name first, then falls back to label name patterns
+    """
+
+    label_lower = label_name.lower()
+    category_lower = category_name.lower()
+
+    # Priority 1: Explicit category name
+    if category_name in ["EVENT", "CAUSE", "ACTION"]:
+        return category_name
+
+    if "event" in category_lower:
+        return "EVENT"
+    elif "cause" in category_lower:
+        return "CAUSE"
+    elif "action" in category_lower:
+        return "ACTION"
+
+    # Priority 2: Known EVENT sublabels
+    event_labels = [
+        'illness', 'accident', 'disease', 'sickness', 'injury', 'death'
+    ]
+    if any(pattern in label_lower for pattern in event_labels):
+        return "EVENT"
+
+    # Priority 3: Known CAUSE sublabels
+    cause_labels = [
+        'material_physical', 'spirits_gods', 'witchcraft', 'sorcery',
+        'rule_violation', 'taboo', 'just_happens', 'physical', 'spirit',
+        'god', 'deity'
+    ]
+    if any(pattern in label_lower for pattern in cause_labels):
+        return "CAUSE"
+
+    # Priority 4: Known ACTION sublabels
+    action_labels = [
+        'physical_material', 'technical_specialist', 'divination',
+        'shaman', 'medium', 'healer', 'priest', 'ritual', 'ceremony',
+        'medicine', 'treatment'
+    ]
+    if any(pattern in label_lower for pattern in action_labels):
+        return "ACTION"
+
+    # Priority 5: Pattern matching
+    # If label starts with known prefixes
+    if label_lower.startswith(('event_', 'illness', 'accident')):
+        return "EVENT"
+    elif label_lower.startswith(('cause_', 'material', 'spirits', 'witch')):
+        return "CAUSE"
+    elif label_lower.startswith(('action_', 'physical', 'shaman', 'priest')):
+        return "ACTION"
+
+    # Default: ACTION (most common category)
+    return "ACTION"
 
 def augment_data_with_main_categories(
     df: pd.DataFrame,
@@ -547,30 +690,40 @@ def augment_data_with_main_categories(
 # ============================================================================
 
 def prepare_datasets(
-    df: pd.DataFrame,
-    label_columns: List[str],
-    passage_col: str,
-    data_config: Dict,
-    tokenizer
+        df: pd.DataFrame,
+        label_columns: List[str],
+        passage_col: str,
+        data_config: Dict,
+        tokenizer
 ) -> Tuple[Dataset, Dataset, Dataset]:
     """Prepare train/val/test datasets with proper data cleaning"""
 
-    # Only keep necessary columns
-    columns_to_keep = [passage_col] + label_columns
+    # ✅ FIX: Filter label_columns to only those that exist in df
+    existing_label_columns = [col for col in label_columns if col in df.columns]
 
-    # Add ID if exists
-    if 'ID' in df.columns:
-        try:
-            df['ID'] = df['ID'].astype(str)
-            columns_to_keep.append('ID')
-        except:
-            pass
+    missing_labels = [col for col in label_columns if col not in df.columns]
+    if missing_labels:
+        print(f"⚠️  Warning: {len(missing_labels)} labels not in DataFrame: {missing_labels[:5]}")
+        print(f"    This is normal if labels were removed during cleaning")
+
+    # Only keep necessary columns
+    columns_to_keep = [passage_col] + existing_label_columns
+
+    # Add optional columns if they exist
+    for optional_col in ['ID', 'passage_id']:
+        if optional_col in df.columns:
+            try:
+                if optional_col == 'ID':
+                    df[optional_col] = df[optional_col].astype(str)
+                columns_to_keep.append(optional_col)
+            except:
+                pass
 
     # Filter to needed columns
     df_clean = df[columns_to_keep].copy()
 
-    # Ensure all label columns are numeric (0/1)
-    for label in label_columns:
+    # ✅ Ensure all label columns are numeric (0/1)
+    for label in existing_label_columns:
         df_clean[label] = pd.to_numeric(df_clean[label], errors='coerce').fillna(0).astype(int)
 
     # Ensure passage column is string
@@ -579,7 +732,7 @@ def prepare_datasets(
     # Remove rows with missing passages
     df_clean = df_clean[df_clean[passage_col].notna()]
 
-    print(f"📊 Cleaned dataset: {len(df_clean)} passages with {len(columns_to_keep)} columns")
+    print(f"📊 Cleaned dataset: {len(df_clean)} passages with {len(existing_label_columns)} labels")
 
     # Split data
     stratify_col = data_config.get("stratify_by")
@@ -617,13 +770,13 @@ def prepare_datasets(
             max_length=data_config["max_length"]
         )
 
-    # Prepare labels
-    def prepare_labels(examples, label_columns):
+    # Prepare labels - ✅ USE EXISTING LABELS ONLY
+    def prepare_labels(examples, label_cols):
         labels = []
-        batch_size = len(examples[label_columns[0]])
+        batch_size = len(examples[label_cols[0]])
 
         for i in range(batch_size):
-            label_vector = [int(examples[col][i]) for col in label_columns]
+            label_vector = [int(examples[col][i]) for col in label_cols]
             labels.append(label_vector)
 
         examples['labels'] = labels
@@ -636,14 +789,15 @@ def prepare_datasets(
     test_dataset = test_dataset.map(tokenize_function, batched=True)
 
     print("🏷️ Preparing labels...")
-    train_dataset = train_dataset.map(lambda x: prepare_labels(x, label_columns), batched=True)
-    val_dataset = val_dataset.map(lambda x: prepare_labels(x, label_columns), batched=True)
-    test_dataset = test_dataset.map(lambda x: prepare_labels(x, label_columns), batched=True)
+    train_dataset = train_dataset.map(lambda x: prepare_labels(x, existing_label_columns), batched=True)
+    val_dataset = val_dataset.map(lambda x: prepare_labels(x, existing_label_columns), batched=True)
+    test_dataset = test_dataset.map(lambda x: prepare_labels(x, existing_label_columns), batched=True)
 
     # Remove unnecessary columns
-    columns_to_remove = [passage_col] + label_columns
-    if 'ID' in train_dataset.column_names:
-        columns_to_remove.append('ID')
+    columns_to_remove = [passage_col] + existing_label_columns
+    for col in ['ID', 'passage_id']:
+        if col in train_dataset.column_names:
+            columns_to_remove.append(col)
 
     train_dataset = train_dataset.remove_columns(
         [col for col in columns_to_remove if col in train_dataset.column_names])
@@ -796,7 +950,7 @@ def find_optimal_thresholds(predictions, labels, label_names):
 # ============================================================================
 
 def visualize_training_history(history: List[Dict], output_dir: Path):
-    """Create training history visualizations"""
+    """Create training history visualizations with FIXED train/eval loss tracking"""
 
     if not history:
         return None
@@ -804,54 +958,138 @@ def visualize_training_history(history: List[Dict], output_dir: Path):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Separate step-level logs (training) from epoch-level logs (evaluation)
+    step_logs = [h for h in history if 'loss' in h and 'eval_loss' not in h]
+    epoch_logs = [h for h in history if 'eval_loss' in h]
+
+    if not epoch_logs:
+        print("⚠️ No evaluation logs found")
+        return None
+
+    # Extract evaluation metrics (these are per-epoch)
+    eval_epochs = [h['epoch'] for h in epoch_logs]
+    eval_loss = [h['eval_loss'] for h in epoch_logs]
+    eval_f1_micro = [h.get('eval_f1_micro', 0) for h in epoch_logs]
+    eval_f1_macro = [h.get('eval_f1_macro', 0) for h in epoch_logs]
+
+    # Calculate average training loss per epoch
+    train_loss_per_epoch = []
+    for eval_epoch in eval_epochs:
+        # Get all training step losses for this epoch
+        epoch_step_losses = [
+            h['loss'] for h in step_logs
+            if 'epoch' in h and abs(h['epoch'] - eval_epoch) < 0.5  # Within same epoch
+        ]
+
+        if epoch_step_losses:
+            avg_loss = np.mean(epoch_step_losses)
+            train_loss_per_epoch.append(avg_loss)
+        else:
+            # Fallback: use last known train loss from epoch log if available
+            train_loss_per_epoch.append(epoch_logs[len(train_loss_per_epoch)].get('train_loss', 0))
+
+    # Create figure
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
-    # Extract metrics
-    epochs = [h['epoch'] for h in history]
-    train_loss = [h.get('train_loss', 0) for h in history]
-    eval_loss = [h.get('eval_loss', 0) for h in history]
-    eval_f1_micro = [h.get('eval_f1_micro', 0) for h in history]
-    eval_f1_macro = [h.get('eval_f1_macro', 0) for h in history]
+    # ========================================================================
+    # PLOT 1: Training and Validation Loss
+    # ========================================================================
+    ax = axes[0, 0]
+    ax.plot(eval_epochs, train_loss_per_epoch, 'b-', label='Train Loss', linewidth=2, marker='o')
+    ax.plot(eval_epochs, eval_loss, 'r-', label='Val Loss', linewidth=2, marker='s')
+    ax.set_xlabel('Epoch', fontsize=11)
+    ax.set_ylabel('Loss', fontsize=11)
+    ax.set_title('Training and Validation Loss', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(alpha=0.3)
 
-    # Loss plot
-    axes[0, 0].plot(epochs, train_loss, 'b-', label='Train Loss', linewidth=2)
-    axes[0, 0].plot(epochs, eval_loss, 'r-', label='Val Loss', linewidth=2)
-    axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('Loss')
-    axes[0, 0].set_title('Training and Validation Loss')
-    axes[0, 0].legend()
-    axes[0, 0].grid(alpha=0.3)
+    # Highlight divergence point (where val loss starts increasing)
+    if len(eval_loss) > 1:
+        min_val_idx = np.argmin(eval_loss)
+        ax.axvline(x=eval_epochs[min_val_idx], color='green', linestyle='--',
+                   alpha=0.5, label=f'Best Val Loss (Epoch {eval_epochs[min_val_idx]:.1f})')
+        ax.legend(fontsize=9)
 
-    # F1 scores
-    axes[0, 1].plot(epochs, eval_f1_micro, 'g-', label='F1 Micro', linewidth=2)
-    axes[0, 1].plot(epochs, eval_f1_macro, 'orange', label='F1 Macro', linewidth=2)
-    axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('F1 Score')
-    axes[0, 1].set_title('F1 Scores')
-    axes[0, 1].legend()
-    axes[0, 1].grid(alpha=0.3)
-    axes[0, 1].set_ylim([0, 1])
+    # ========================================================================
+    # PLOT 2: F1 Scores
+    # ========================================================================
+    ax = axes[0, 1]
+    ax.plot(eval_epochs, eval_f1_micro, 'g-', label='F1 Micro', linewidth=2, marker='o')
+    ax.plot(eval_epochs, eval_f1_macro, 'orange', label='F1 Macro', linewidth=2, marker='s')
+    ax.set_xlabel('Epoch', fontsize=11)
+    ax.set_ylabel('F1 Score', fontsize=11)
+    ax.set_title('F1 Scores', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(alpha=0.3)
+    ax.set_ylim([0, 1])
 
-    # Loss ratio (overfitting indicator)
-    loss_ratio = [e / t if t > 0 else 1 for e, t in zip(eval_loss, train_loss)]
-    axes[1, 0].plot(epochs, loss_ratio, 'purple', linewidth=2)
-    axes[1, 0].axhline(y=1.0, color='r', linestyle='--', alpha=0.5)
-    axes[1, 0].set_xlabel('Epoch')
-    axes[1, 0].set_ylabel('Eval Loss / Train Loss')
-    axes[1, 0].set_title('Overfitting Indicator (>1 = overfitting)')
-    axes[1, 0].grid(alpha=0.3)
+    # Highlight best F1
+    max_f1_idx = np.argmax(eval_f1_micro)
+    ax.axvline(x=eval_epochs[max_f1_idx], color='purple', linestyle='--',
+               alpha=0.5, label=f'Best F1 (Epoch {eval_epochs[max_f1_idx]:.1f})')
+    ax.legend(fontsize=9)
 
-    # Learning rate
-    learning_rates = [h.get('learning_rate', 0) for h in history]
-    if any(learning_rates):
-        axes[1, 1].plot(epochs, learning_rates, 'brown', linewidth=2)
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Learning Rate')
-        axes[1, 1].set_title('Learning Rate Schedule')
-        axes[1, 1].grid(alpha=0.3)
+    # ========================================================================
+    # PLOT 3: Overfitting Indicator (FIXED)
+    # ========================================================================
+    ax = axes[1, 0]
+
+    # Calculate loss ratio correctly
+    loss_ratio = []
+    for train_l, eval_l in zip(train_loss_per_epoch, eval_loss):
+        if train_l > 0.001:  # Avoid division by zero
+            ratio = eval_l / train_l
+        else:
+            ratio = 1.0
+        loss_ratio.append(ratio)
+
+    ax.plot(eval_epochs, loss_ratio, color='purple', linewidth=2, marker='d')
+    ax.axhline(y=1.0, color='green', linestyle='--', alpha=0.5, linewidth=1.5,
+               label='No overfitting (ratio=1)')
+    ax.fill_between(eval_epochs, 1.0, max(loss_ratio) + 0.1, alpha=0.1, color='red',
+                    label='Overfitting zone')
+    ax.set_xlabel('Epoch', fontsize=11)
+    ax.set_ylabel('Eval Loss / Train Loss', fontsize=11)
+    ax.set_title('Overfitting Indicator (>1 = overfitting)', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.3)
+
+    # Add annotations for severe overfitting
+    for i, (epoch, ratio) in enumerate(zip(eval_epochs, loss_ratio)):
+        if ratio > 1.5:  # Significant overfitting
+            ax.annotate(f'{ratio:.2f}',
+                        xy=(epoch, ratio),
+                        xytext=(5, 5),
+                        textcoords='offset points',
+                        fontsize=8,
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.5))
+
+    # ========================================================================
+    # PLOT 4: Learning Rate Schedule
+    # ========================================================================
+    ax = axes[1, 1]
+
+    # Extract learning rates from step logs
+    lr_epochs = []
+    learning_rates = []
+
+    for h in step_logs:
+        if 'learning_rate' in h and 'epoch' in h:
+            lr_epochs.append(h['epoch'])
+            learning_rates.append(h['learning_rate'])
+
+    if learning_rates:
+        ax.plot(lr_epochs, learning_rates, color='brown', linewidth=1, alpha=0.7)
+        ax.set_xlabel('Epoch', fontsize=11)
+        ax.set_ylabel('Learning Rate', fontsize=11)
+        ax.set_title('Learning Rate Schedule', fontsize=12, fontweight='bold')
+        ax.grid(alpha=0.3)
+        ax.ticklabel_format(style='scientific', axis='y', scilimits=(0, 0))
     else:
-        axes[1, 1].text(0.5, 0.5, 'Learning rate data not available',
-                        ha='center', va='center', transform=axes[1, 1].transAxes)
+        ax.text(0.5, 0.5, 'Learning rate data not available',
+                ha='center', va='center', transform=ax.transAxes, fontsize=11)
+        ax.set_xticks([])
+        ax.set_yticks([])
 
     plt.tight_layout()
 
@@ -975,6 +1213,10 @@ def get_default_training_config() -> Dict:
         "weight_decay": 0.01,
         "max_length": 512,
         "label_smoothing": 0.0,
+
+        "use_early_stopping": True,
+        "early_stopping_patience": 3,
+        "early_stopping_threshold": 0.001,
 
         # Data Configuration
         "test_size": 0.2,
@@ -1110,11 +1352,12 @@ def render_training_page(session_state: Dict):
 # CONFIGURATION UI
 # ============================================================================
 
+
 def render_training_configuration(
-    session_state: Dict,
-    df: pd.DataFrame,
-    label_columns: List[str],
-    passage_col: str
+        session_state: Dict,
+        df: pd.DataFrame,
+        label_columns: List[str],
+        passage_col: str
 ):
     """Render comprehensive training configuration UI"""
 
@@ -1126,14 +1369,14 @@ def render_training_configuration(
     training_df = None
 
     # ========================================================================
-    # SECTION 1: DATASET SELECTION
+    # SECTION 1: DATASET SELECTION - FIXED WITH TIER DETECTION
     # ========================================================================
 
     st.markdown("#### 1️⃣ Dataset Selection")
 
     dataset_source = st.radio(
         "Data source:",
-        ["Current Dataset", "Browse Experiments", "Browse DataObjects"],
+        ["Current Dataset", "Browse Tiered Data", "Browse Experiments"],
         horizontal=True
     )
 
@@ -1141,12 +1384,8 @@ def render_training_configuration(
         st.info(f"Using current dataset: {len(df):,} passages")
         training_df = df
 
-    elif dataset_source == "Browse Experiments":
-        training_df = load_from_experiments(df, label_columns, passage_col)
-
-    elif dataset_source == "Browse DataObjects":
-        st.info("💡 DataObject loading coming soon")
-        training_df = df
+    elif dataset_source == "Browse Tiered Data":
+        training_df = load_from_tiered_objects(df, label_columns, passage_col)
 
     # Fallback
     if training_df is None:
@@ -1154,6 +1393,84 @@ def render_training_configuration(
         training_df = df
 
     st.markdown("---")
+
+    # ========================================================================
+    # VISUAL CONFIRMATION OF TRAINING DATA
+    # ========================================================================
+
+    st.markdown("---")
+    st.markdown("#### ✅ Training Data Confirmation")
+
+    with st.expander("📊 Verify Training Data", expanded=True):
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric("Total Passages", f"{len(training_df):,}")
+
+        with col2:
+            st.metric("Total Labels", len(label_columns))
+
+        with col3:
+            # Check which columns exist
+            has_tier_cols = 'confidence_composite' in training_df.columns
+            if has_tier_cols:
+                st.metric("Data Type", "✅ Tiered")
+                avg_confidence = training_df['confidence_composite'].mean()
+                st.caption(f"Avg confidence: {avg_confidence:.3f}")
+            else:
+                st.metric("Data Type", "⚠️ Full Dataset")
+                st.caption("No quality scores")
+
+        with col4:
+            # Count passages per label
+            avg_labels = training_df[label_columns].sum(axis=1).mean()
+            st.metric("Avg Labels/Passage", f"{avg_labels:.1f}")
+
+        # Show label distribution in training data
+        st.markdown("**Label Distribution in Training Data:**")
+
+        label_dist = []
+        for label in label_columns[:10]:  # Show first 10
+            if label in training_df.columns:
+                count = int((training_df[label] == 1).sum())
+                pct = (count / len(training_df)) * 100
+                label_dist.append({
+                    'Label': label,
+                    'Count': count,
+                    'Percentage': f"{pct:.1f}%"
+                })
+
+        if label_dist:
+            st.dataframe(
+                pd.DataFrame(label_dist),
+                hide_index=True,
+                width='stretch'
+            )
+
+        # Sample passage preview
+        st.markdown("**Sample Passage from Training Data:**")
+        sample_idx = training_df.index[0]
+        sample_text = str(training_df.loc[sample_idx, passage_col])[:200]
+        st.caption(f"{sample_text}...")
+
+        # Show which file was loaded (if from tiered data)
+        if dataset_source == "Browse Tiered Data":
+            st.success(f"✅ **Loaded from tiered dataset**")
+            if has_tier_cols:
+                st.caption("Contains quality scores - this is tiered data")
+        elif dataset_source == "Browse Experiments":
+            st.info(f"ℹ️ **Loaded from experiment**")
+        else:
+            st.warning(f"⚠️ **Using full dataset** - not quality-stratified")
+
+    st.markdown("---")
+
+    # Store for start_training to use
+    session_state['training_working_data'] = {
+        'df': training_df,
+        'label_columns': label_columns,
+        'passage_col': passage_col
+    }
 
     # ========================================================================
     # SECTION 2: MODEL ARCHITECTURE
@@ -1177,12 +1494,12 @@ def render_training_configuration(
 
     with col2:
         config["num_hidden_layers"] = st.number_input(
-            "Hidden layers:",
+            "Classifier hidden layers:",
             1, 5, config["num_hidden_layers"]
         )
 
         config["hierarchical_hidden_size"] = st.number_input(
-            "Hidden size:",
+            "Classifier Hidden size:",
             128, 1024, config["hierarchical_hidden_size"], step=64
         )
 
@@ -1358,10 +1675,68 @@ def render_training_configuration(
             0.0, 0.2, config["label_smoothing"], 0.01
         )
 
+
+
     st.markdown("---")
 
     # ========================================================================
-    # SECTION 5: DATA SPLIT
+    # SECTION 5: EARLY STOPPING (NEW)
+    # ========================================================================
+
+    st.markdown("#### 5️⃣ Early Stopping")
+
+    st.info("🛑 Stop training automatically when validation performance stops improving")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        config["use_early_stopping"] = st.checkbox(
+            "Enable early stopping",
+            value=config.get("use_early_stopping", True),
+            help="Automatically stop training when validation F1 stops improving"
+        )
+
+    with col2:
+        if config["use_early_stopping"]:
+            config["early_stopping_patience"] = st.number_input(
+                "Patience (epochs):",
+                1, 10,
+                config.get("early_stopping_patience", 3),
+                help="Stop after N epochs without improvement"
+            )
+        else:
+            st.caption("Early stopping disabled")
+            config["early_stopping_patience"] = 3
+
+    with col3:
+        if config["use_early_stopping"]:
+            config["early_stopping_threshold"] = st.number_input(
+                "Min improvement:",
+                0.0001, 0.01,
+                config.get("early_stopping_threshold", 0.001),
+                format="%.4f",
+                help="Minimum F1 improvement to count as better"
+            )
+        else:
+            st.caption("Early stopping disabled")
+            config["early_stopping_threshold"] = 0.001
+
+    # Show what will happen
+    if config["use_early_stopping"]:
+        st.success(
+            f"✅ Will stop training after {config['early_stopping_patience']} epochs "
+            f"without ≥{config['early_stopping_threshold']:.4f} improvement in validation F1"
+        )
+    else:
+        st.warning(
+            f"⚠️ Will train for full {config['num_epochs']} epochs "
+            "(may lead to overfitting)"
+        )
+
+    st.markdown("---")
+
+    # ========================================================================
+    # SECTION 6: DATA SPLIT
     # ========================================================================
 
     st.markdown("#### 5️⃣ Data Split")
@@ -1396,7 +1771,7 @@ def render_training_configuration(
     st.markdown("---")
 
     # ========================================================================
-    # SECTION 6: EXPERIMENT INFO
+    # SECTION :7 EXPERIMENT INFO
     # ========================================================================
 
     st.markdown("#### 6️⃣ Experiment Info")
@@ -1463,117 +1838,332 @@ def render_training_configuration(
     st.markdown("---")
 
     # ========================================================================
+    # OPTIONAL DIAGNOSTICS - JSON Config Dump
+    # ========================================================================
+
+    with st.expander("🔍 View Configuration (JSON)", expanded=False):
+
+        diagnostic_data = {
+            'training_config': config,
+            'data_info': {
+                'num_passages': len(training_df),
+                'num_labels': len(label_columns),
+                'label_columns': label_columns,
+                'passage_column': passage_col,
+                'has_tier_data': 'confidence_composite' in training_df.columns,
+                'data_shape': list(training_df.shape)
+            },
+            'label_distribution': {
+                label: {
+                    'count': int((training_df[label] == 1).sum()) if label in training_df.columns else 0,
+                    'percentage': float(
+                        (training_df[label] == 1).sum() / len(training_df) * 100) if label in training_df.columns else 0
+                }
+                for label in label_columns[:20]  # First 20 labels
+            }
+        }
+
+        st.json(diagnostic_data)
+
+    st.markdown("---")
+
+    # ========================================================================
     # START TRAINING BUTTON
     # ========================================================================
 
     if not session_state.get('training_active', False):
         if st.button("🚀 Start Training", type="primary", width='stretch'):
-            start_training(session_state, training_df, label_columns, passage_col)
+            working = session_state['training_working_data']
+            start_training(
+                session_state,
+                working['df'],
+                working['label_columns'],
+                working['passage_col']
+            )
     else:
         st.warning("⚠️ Training in progress...")
-        if st.button("🛑 Stop Training", type="secondary"):
-            session_state['training_active'] = False
+        if st.button("🛑 Stop Training", type="secondary", width='stretch'):
+            # Set the flag that the monitor callback checks
+            st.session_state['request_training_stop'] = True
+            st.session_state['training_active'] = False
+            st.warning("⚠️ Stop requested - finishing current epoch...")
             st.rerun()
 
 
-def load_from_experiments(
-    df: pd.DataFrame,
-    label_columns: List[str],
-    passage_col: str
+# core/model_training.py - REPLACE existing function
+
+def load_from_tiered_objects(
+        df: pd.DataFrame,
+        label_columns: List[str],
+        passage_col: str
 ) -> pd.DataFrame:
-    """Load dataset from saved experiments"""
+    """
+    Load tiered training data from saved DataObjects with full tracking
 
-    experiment = DataExperiment()
-    experiments = experiment.list_experiments()
+    Returns:
+        DataFrame with training data (or original df if loading fails)
+    """
 
-    if not experiments:
-        st.warning("No experiments found. Create experiments in Data Prep page.")
+    from core.data_objects import DataObjectManager, PipelineStage
+
+    manager = DataObjectManager()
+    tiered_objects = manager.list_objects(stage=PipelineStage.TIERED)
+
+    if not tiered_objects:
+        st.warning("⚠️ No tiered datasets found in ./data/objects/tiered/")
+        st.info("💡 Create tiered datasets first on the Data page")
         return df
 
-    # Filter options
-    exp_names = [exp['name'] for exp in experiments]
-    selected_exp_name = st.selectbox(
-        "Select experiment:",
-        exp_names,
-        key="exp_selector"
+    # ========================================================================
+    # TIER SELECTION
+    # ========================================================================
+
+    st.markdown("**📂 Select Tiered Dataset**")
+
+    tiered_names = [obj['name'] for obj in tiered_objects]
+    selected_name = st.selectbox(
+        "Tiered dataset:",
+        tiered_names,
+        key="tiered_dataset_selector"
     )
 
-    selected_exp = next((exp for exp in experiments if exp['name'] == selected_exp_name), None)
+    selected_obj = next(obj for obj in tiered_objects if obj['name'] == selected_name)
+    obj_dir = Path(selected_obj['directory'])
 
-    if not selected_exp:
-        st.error("Could not load selected experiment")
-        return df
+    # ========================================================================
+    # SHOW TIER STATISTICS
+    # ========================================================================
 
-    meta = selected_exp['metadata']
+    st.markdown("**📊 Tier Statistics**")
 
-    # Show experiment info
+    metadata = selected_obj.get('metadata', {})
+
     col1, col2, col3 = st.columns(3)
+
     with col1:
-        if 'statistics' in meta:
-            st.metric("Passages", meta['statistics']['num_passages'])
-        elif 'tiers' in meta:
-            total_passages = sum(
-                tier_data.get('count', 0)
-                for tier_data in meta['tiers'].values()
-            )
-            st.metric("Passages", total_passages)
-        else:
-            st.metric("Passages", "N/A")
+        tier1_size = metadata.get('tier1_size', 'N/A')
+        st.metric("Tier 1 (Elite)", tier1_size)
+        if tier1_size != 'N/A':
+            st.caption("Highest quality")
 
     with col2:
-        if 'statistics' in meta:
-            st.metric("Labels", len(meta['statistics']['label_columns']))
-        elif 'label_columns' in meta:
-            st.metric("Labels", len(meta['label_columns']))
-        else:
-            st.metric("Labels", "N/A")
+        tier2_size = metadata.get('tier2_size', 'N/A')
+        st.metric("Tier 2 (Expansion)", tier2_size)
+        if tier2_size != 'N/A':
+            st.caption("Good quality")
 
     with col3:
-        exp_type = meta.get('experiment_type', 'unknown')
-        st.metric("Type", exp_type)
+        inference_size = metadata.get('inference_size', 'N/A')
+        st.metric("Inference (Test)", inference_size)
+        if inference_size != 'N/A':
+            st.caption("Eval/test set")
 
-    # Load the experiment
-    try:
-        if exp_type == 'tiered_training':
-            st.markdown("**Select tier(s) to train on:**")
-            tier_choice = st.radio(
-                "Training data:",
-                ["Tier 1 Only", "Tier 1 + Tier 2 Combined"],
-                horizontal=True,
-                key="tier_choice_exp"
+    # Show quality scores if available
+    if 'tier_configuration' in metadata:
+        with st.expander("🎯 Quality Thresholds Used", expanded=False):
+            tier_config = metadata['tier_configuration']
+
+            if 'tiers' in tier_config:
+                for tier_name, tier_data in tier_config['tiers'].items():
+                    if 'quality' in tier_data:
+                        st.markdown(f"**{tier_name.title()}**")
+                        q = tier_data['quality']
+                        st.caption(f"Consistency: {q.get('consistency_mean', 0):.3f}")
+                        st.caption(f"Rerank: {q.get('rerank_mean', 0):.3f}")
+
+    st.markdown("---")
+
+    # ========================================================================
+    # TRAINING STRATEGY SELECTION
+    # ========================================================================
+
+    st.markdown("**🎯 Training Strategy**")
+
+    tier_choice = st.radio(
+        "Select data to use:",
+        [
+            "Tier 1 Only (Highest quality)",
+            "Tier 1 + Tier 2 Combined (All quality data)",
+            "🎓 Curriculum Learning (Tier 1 → Combined)",
+            "Inference Set (Test/eval only)"
+        ],
+        key="tier_training_strategy",
+        help="""
+        - **Tier 1 Only**: Train on only the highest quality passages (conservative)
+        - **Combined**: Use all quality-filtered data (recommended for most cases)
+        - **Curriculum**: Start with Tier 1, then switch to combined mid-training
+        - **Inference**: Use this only for final evaluation, not training
+        """
+    )
+
+    # ========================================================================
+    # CURRICULUM LEARNING SETUP
+    # ========================================================================
+
+    if "Curriculum" in tier_choice:
+        st.info("📚 **Curriculum Learning Strategy**")
+        st.caption("Train on elite data first, then expand to all quality data")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            curriculum_split_epoch = st.number_input(
+                "Switch to combined after epoch:",
+                min_value=1,
+                max_value=30,
+                value=5,
+                key="curriculum_split_epoch_input",
+                help="Train on Tier 1 for N epochs, then switch to Tier 1 + Tier 2"
             )
 
-            if "Tier 1 Only" in tier_choice:
-                data_file = selected_exp['directory'] / "tier1.xlsx"
-                training_df = pd.read_excel(data_file)
-                st.info(f"Using Tier 1: {len(training_df):,} passages")
-            else:
-                data_file = selected_exp['directory'] / "tier1_tier2_combined.xlsx"
-                training_df = pd.read_excel(data_file)
-                st.info(f"Using Combined: {len(training_df):,} passages")
+        with col2:
+            total_epochs = st.session_state.get('training_config', {}).get('num_epochs', 10)
+            remaining = max(0, total_epochs - curriculum_split_epoch)
+            st.metric(
+                "Remaining epochs on combined",
+                remaining,
+                help="After the switch, train on combined for this many epochs"
+            )
 
-            # Update label columns from metadata
-            if 'label_columns' in meta:
-                label_columns = meta['label_columns']
+            if remaining < 5:
+                st.warning("⚠️ Consider increasing total epochs for better results")
 
-        else:
-            # Single dataset experiment
-            data_file = selected_exp['directory'] / "data.xlsx"
-            training_df = pd.read_excel(data_file)
-            st.info(f"Using experiment data: {len(training_df):,} passages")
+        # ✅ LOAD BOTH DATASETS
+        tier1_path = obj_dir / "tier1.xlsx"
+        combined_path = obj_dir / "data.xlsx"  # This is tier1 + tier2
 
-            # Update label columns from metadata
-            if 'statistics' in meta:
-                label_columns = meta['statistics']['label_columns']
-            elif 'label_columns' in meta:
-                label_columns = meta['label_columns']
+        # Validate files exist
+        if not tier1_path.exists():
+            st.error(f"❌ Tier 1 file not found: {tier1_path}")
+            return df
 
-        return training_df
+        if not combined_path.exists():
+            st.error(f"❌ Combined file not found: {combined_path}")
+            return df
 
-    except Exception as e:
-        st.error(f"Error loading experiment: {e}")
-        return df
+        # Load DataFrames
+        try:
+            tier1_df = pd.read_excel(tier1_path)
+            combined_df = pd.read_excel(combined_path)
 
+            # Validate data
+            if len(tier1_df) == 0 or len(combined_df) == 0:
+                st.error("❌ Loaded datasets are empty")
+                return df
+
+            if passage_col not in tier1_df.columns or passage_col not in combined_df.columns:
+                st.error(f"❌ Passage column '{passage_col}' not found in tier data")
+                return df
+
+            # ✅ STORE CURRICULUM CONFIG IN SESSION STATE
+            st.session_state['curriculum_config'] = {
+                'enabled': True,
+                'switch_epoch': curriculum_split_epoch,
+                'tier1_df': tier1_df,
+                'combined_df': combined_df
+            }
+
+            # ✅ STORE DATASET METADATA
+            st.session_state['last_loaded_dataset'] = {
+                'source': 'tiered_object',
+                'source_type': 'curriculum',
+                'name': selected_name,
+                'tier_choice': tier_choice,
+                'path': str(obj_dir),
+                'tier1_path': str(tier1_path),
+                'combined_path': str(combined_path),
+                'tier1_size': len(tier1_df),
+                'combined_size': len(combined_df),
+                'switch_epoch': curriculum_split_epoch,
+                'loaded_at': datetime.now().isoformat(),
+                'has_quality_scores': 'confidence_composite' in tier1_df.columns
+            }
+
+            st.success(f"✅ Loaded Tier 1: {len(tier1_df):,} passages")
+            st.success(f"✅ Loaded Combined: {len(combined_df):,} passages")
+            st.info(f"🎓 Will switch from Tier 1 to Combined at epoch {curriculum_split_epoch}")
+
+            # Return tier1 as initial training data
+            return tier1_df
+
+        except Exception as e:
+            st.error(f"❌ Error loading curriculum datasets: {e}")
+            import traceback
+            with st.expander("Error details"):
+                st.code(traceback.format_exc())
+            return df
+
+    # ========================================================================
+    # STANDARD (NON-CURRICULUM) LOADING
+    # ========================================================================
+
+    else:
+        # Clear any existing curriculum config
+        if 'curriculum_config' in st.session_state:
+            del st.session_state['curriculum_config']
+
+        # Determine which file to load
+        if "Tier 1 Only" in tier_choice:
+            file_path = obj_dir / "tier1.xlsx"
+            tier_type = "tier1"
+        elif "Combined" in tier_choice:
+            file_path = obj_dir / "data.xlsx"  # Combined tier1 + tier2
+            tier_type = "combined"
+        else:  # Inference
+            file_path = obj_dir / "inference.xlsx"
+            tier_type = "inference"
+
+        # Validate file exists
+        if not file_path.exists():
+            st.error(f"❌ File not found: {file_path}")
+            st.info(f"Expected path: {file_path}")
+            return df
+
+        # Load DataFrame
+        try:
+            training_df = pd.read_excel(file_path)
+
+            # Validate data
+            if len(training_df) == 0:
+                st.error("❌ Loaded dataset is empty")
+                return df
+
+            if passage_col not in training_df.columns:
+                st.error(f"❌ Passage column '{passage_col}' not found")
+                st.info(f"Available columns: {', '.join(training_df.columns.tolist()[:10])}")
+                return df
+
+            # Check for quality scores
+            has_quality_scores = 'confidence_composite' in training_df.columns
+
+            # ✅ STORE DATASET METADATA
+            st.session_state['last_loaded_dataset'] = {
+                'source': 'tiered_object',
+                'source_type': tier_type,
+                'name': selected_name,
+                'tier_choice': tier_choice,
+                'path': str(obj_dir),
+                'file_path': str(file_path),
+                'num_passages': len(training_df),
+                'loaded_at': datetime.now().isoformat(),
+                'has_quality_scores': has_quality_scores
+            }
+
+            # Show success message with details
+            st.success(f"✅ Loaded: {len(training_df):,} passages from {file_path.name}")
+
+            if has_quality_scores:
+                avg_quality = training_df['confidence_composite'].mean()
+                st.info(f"📊 Quality scores present (avg: {avg_quality:.3f})")
+
+            return training_df
+
+        except Exception as e:
+            st.error(f"❌ Error loading dataset: {e}")
+            import traceback
+            with st.expander("Error details"):
+                st.code(traceback.format_exc())
+            return df
 
 # ============================================================================
 # MONITORING UI
@@ -1830,6 +2420,42 @@ def extract_sublabel_metrics(
     return sublabel_metrics
 
 
+def get_improved_config_for_rare_labels(base_config: Dict) -> Dict:
+    """
+    Enhanced config for better rare label performance
+
+    Key changes:
+    - Higher focal gamma (more focus on hard examples)
+    - Increased dropout (prevent overfitting on common labels)
+    - Longer warmup (stabilize rare label learning)
+    - Label smoothing (reduce overconfidence)
+    """
+
+    improved = base_config.copy()
+
+    # Increase focal loss intensity
+    improved['focal_gamma'] = 5.0  # Up from 4.5 - even more focus on hard examples
+
+    # Increase regularization
+    improved['dropout'] = 0.20  # Up from 0.15
+    improved['attention_dropout'] = 0.15  # Up from 0.1
+    improved['weight_decay'] = 0.02  # Up from 0.01
+
+    # Add label smoothing to reduce overconfidence
+    improved['label_smoothing'] = 0.05  # Smooth labels slightly
+
+    # Longer warmup for stability
+    improved['warmup_steps'] = 800  # Up from 500
+
+    # Smaller batch size for better rare label gradients
+    improved['batch_size'] = 8  # Down from 12
+    improved['gradient_accumulation_steps'] = 2  # Effective batch = 16
+
+    # More hidden capacity for complex patterns
+    improved['num_hidden_layers'] = 4  # Up from 3
+
+    return improved
+
 def compare_models_fairly(
         model1_results: Dict,
         model1_label_names: List[str],
@@ -1935,10 +2561,10 @@ def compare_models_fairly(
 # ============================================================================
 
 def start_training(
-    session_state: Dict,
-    training_df: pd.DataFrame,
-    label_columns: List[str],
-    passage_col: str
+        session_state: Dict,
+        training_df: pd.DataFrame,
+        label_columns: List[str],
+        passage_col: str
 ):
     """Execute the training process"""
 
@@ -1946,7 +2572,10 @@ def start_training(
 
     st.info("🚀 Initializing training...")
 
-    # Validate training data
+    # ========================================================================
+    # VALIDATION
+    # ========================================================================
+
     if len(training_df) == 0:
         st.error("❌ Training dataset is empty!")
         return
@@ -1955,57 +2584,94 @@ def start_training(
         st.error(f"❌ Passage column '{passage_col}' not found!")
         return
 
-    missing_labels = [label for label in label_columns if label not in training_df.columns]
-    if missing_labels and not config["use_hierarchy"]:
-        st.error(f"❌ Missing label columns: {missing_labels}")
-        return
-
     valid_passages = training_df[passage_col].notna().sum()
     if valid_passages == 0:
         st.error("❌ No valid passages found!")
         return
 
-    if valid_passages < len(training_df):
-        st.warning(f"⚠️ {len(training_df) - valid_passages} passages have missing text and will be removed")
-
     st.success(f"✅ Validated: {valid_passages} passages")
 
-    # Create output directory
+    # ✅ CAPTURE DATASET METADATA
+    import hashlib
+
+    dataset_metadata = {
+        'num_passages': len(training_df),
+        'num_labels': len(label_columns),
+        'label_columns': label_columns,
+        'passage_column': passage_col,
+
+        # Source tracking
+        'source_info': session_state.get('last_loaded_dataset', {
+            'source': 'unknown',
+            'source_type': 'current'
+        }),
+
+        # Data characteristics
+        'has_quality_scores': 'confidence_composite' in training_df.columns,
+        'passage_stats': {
+            'mean_length': float(training_df[passage_col].str.len().mean()),
+            'median_length': float(training_df[passage_col].str.len().median()),
+            'min_length': int(training_df[passage_col].str.len().min()),
+            'max_length': int(training_df[passage_col].str.len().max())
+        },
+
+        # Label distribution
+        'label_distribution': {
+            label: {
+                'count': int((training_df[label] == 1).sum()),
+                'frequency': float((training_df[label] == 1).sum() / len(training_df))
+            }
+            for label in label_columns
+        },
+
+        # Reproducibility
+        'dataset_hash': hashlib.md5(
+            training_df[passage_col].astype(str).str.cat().encode()
+        ).hexdigest()[:16]
+    }
+
+    # Add quality score stats if available
+    if dataset_metadata['has_quality_scores']:
+        dataset_metadata['quality_stats'] = {
+            'consistency_mean': float(training_df['confidence_consistency'].mean())
+            if 'confidence_consistency' in training_df.columns else None,
+            'rerank_mean': float(training_df['confidence_rerank'].mean())
+            if 'confidence_rerank' in training_df.columns else None,
+            'composite_mean': float(training_df['confidence_composite'].mean())
+        }
+
+    # Store for use during training
+    session_state['dataset_metadata'] = dataset_metadata
+
+    # ========================================================================
+    # SETUP OUTPUT DIRECTORY
+    # ========================================================================
+
     output_dir = Path(f"./models/{config['experiment_name']}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build label structure
-    if config["use_hierarchy"] and config.get("hierarchy_config"):
-        st.info("📋 Building hierarchical label structure...")
+    # ========================================================================
+    # BUILD LABEL STRUCTURE
+    # ========================================================================
 
+    st.info("📋 Building label structure...")
+
+    if config["use_hierarchy"] and config.get("hierarchy_config"):
         hierarchy = config["hierarchy_config"]
         label_structure, ordered_labels = build_label_structure_from_hierarchy(
             hierarchy,
             config["predict_main_labels"]
         )
 
-        # Augment data with main categories if needed
         training_df = augment_data_with_main_categories(
             training_df,
             label_structure,
             config["predict_main_labels"]
         )
 
-        # Use ordered labels for training
         final_label_list = ordered_labels
-
-        st.success(f"✅ Hierarchical structure: {len(label_structure)} categories, {len(final_label_list)} total labels")
-
-        if config["predict_main_labels"]:
-            num_main = sum(1 for cat in label_structure.values() if cat['enabled'])
-            num_sub = len(final_label_list) - num_main
-            st.info(f"📊 Training with: {num_main} main labels + {num_sub} sublabels")
-        else:
-            st.info(f"📊 Training with: {len(final_label_list)} sublabels only (hierarchy for structure)")
+        st.success(f"✅ Hierarchical structure: {len(label_structure)} categories, {len(final_label_list)} labels")
     else:
-        st.info("📋 Using flat label structure...")
-
-        # Flat structure
         final_label_list = label_columns
 
         label_structure = {
@@ -2015,25 +2681,28 @@ def start_training(
                 'enabled': True
             }
         }
-
         st.success(f"✅ Flat structure: {len(final_label_list)} labels")
 
-    # Save final label list
     session_state['final_label_list'] = final_label_list
 
     # Calculate label dimensions
     label_dims = calculate_label_dimensions(label_structure, config["predict_main_labels"])
-
     st.info(f"🏗️ Model architecture: {label_dims['total_labels']} total labels")
 
-    # Initialize training session
+    # ========================================================================
+    # INITIALIZE MODEL
+    # ========================================================================
+
     training_session = TrainingSession(config, str(output_dir))
 
     with st.spinner("Initializing model..."):
         model_info = training_session.initialize_model(label_dims)
         st.success(f"✅ Model initialized: {model_info['trainable_params']:,} trainable parameters")
 
-    # Prepare datasets
+    # ========================================================================
+    # PREPARE DATASETS
+    # ========================================================================
+
     with st.spinner("Preparing datasets..."):
         train_dataset, val_dataset, test_dataset = prepare_datasets(
             training_df,
@@ -2051,31 +2720,41 @@ def start_training(
 
         st.success(f"✅ Datasets: {len(train_dataset)} train, {len(val_dataset)} val, {len(test_dataset)} test")
 
-    # Calculate class weights
+        dataset_metadata['splits'] = {
+            'train': len(train_dataset),
+            'validation': len(val_dataset),
+            'test': len(test_dataset),
+            'train_pct': len(train_dataset) / len(training_df) * 100,
+            'val_pct': len(val_dataset) / len(training_df) * 100,
+            'test_pct': len(test_dataset) / len(training_df) * 100
+        }
+
+    # ========================================================================
+    # CALCULATE CLASS WEIGHTS
+    # ========================================================================
+
     class_weights = None
     if config["use_weighted_loss"]:
         with st.spinner("Calculating class weights..."):
             class_weights = calculate_class_weights(training_df, final_label_list)
-
-            # ✅ DEBUG: Show weights
-            st.markdown("**📊 Class Weights Debug:**")
-            weights_df = pd.DataFrame({
-                'Label': final_label_list,
-                'Weight': [f"{w:.2f}" for w in class_weights.tolist()]
-            })
-
-            # Display in expander
-            with st.expander("View Class Weights", expanded=False):
-                st.dataframe(weights_df, hide_index=True, width='stretch')
-
-            # Check for extreme weights
             max_weight = class_weights.max().item()
-            if max_weight > 100:
-                st.warning(f"⚠️ Very high weight detected: {max_weight:.1f}x - capped at 50x")
+            st.info(f"📊 Using weighted loss (max weight: {min(max_weight, 100.0):.1f}x)")
 
-            st.info(f"📊 Using weighted loss for {len(final_label_list)} labels (max weight: {min(max_weight, 50.0):.1f}x)")
+    # ========================================================================
+    # CREATE TRAINING MONITOR (BEFORE TRAINER!)
+    # ========================================================================
 
-    # Training arguments
+    from components.training_monitor import create_training_monitor
+
+    st.markdown("---")
+    st.markdown("### 🎯 Training Monitor")
+
+    monitor_callback, monitor_placeholder = create_training_monitor()
+
+    # ========================================================================
+    # CREATE TRAINING ARGUMENTS
+    # ========================================================================
+
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=config["num_epochs"],
@@ -2086,13 +2765,14 @@ def start_training(
         weight_decay=config["weight_decay"],
         lr_scheduler_type="cosine",
         learning_rate=config["learning_rate"],
+        max_grad_norm=1.0,
         logging_dir=f'{output_dir}/logs',
         logging_steps=50,
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_f1_micro",
+        metric_for_best_model="loss",
         greater_is_better=True,
         report_to="none",
         fp16=torch.cuda.is_available(),
@@ -2100,15 +2780,111 @@ def start_training(
         remove_unused_columns=False,
     )
 
-    from transformers import EarlyStoppingCallback
+    # ========================================================================
+    # IDENTIFY MAIN LABELS (for metrics)
+    # ========================================================================
 
     main_label_names = None
     if config["use_hierarchy"] and config["predict_main_labels"]:
-        # Extract main category names from label structure
         main_label_names = [
             cat_name for cat_name, cat_data in label_structure.items()
             if cat_data.get('enabled', True)
         ]
+
+    # ========================================================================
+    # CREATE ADDITIONAL CALLBACKS
+    # ========================================================================
+
+    # Curriculum learning callback (if enabled)
+    curriculum_config = session_state.get('curriculum_config')
+    curriculum_callback = None
+
+    if curriculum_config and curriculum_config.get('enabled'):
+        st.info("📚 Curriculum Learning Active")
+
+        combined_df = curriculum_config['combined_df']
+        necessary_cols = [passage_col] + final_label_list
+        existing_necessary = [col for col in necessary_cols if col in combined_df.columns]
+        combined_df_clean = combined_df[existing_necessary].copy()
+        combined_df_clean[passage_col] = combined_df_clean[passage_col].astype(str)
+
+        for label in final_label_list:
+            if label in combined_df_clean.columns:
+                combined_df_clean[label] = pd.to_numeric(
+                    combined_df_clean[label],
+                    errors='coerce'
+                ).fillna(0).astype(int)
+
+        def tokenize_function_combined(examples):
+            return training_session.tokenizer(
+                examples[passage_col],
+                padding='max_length',
+                truncation=True,
+                max_length=config["max_length"]
+            )
+
+        def prepare_labels_combined(examples):
+            labels = []
+            first_label = next(l for l in final_label_list if l in existing_necessary)
+            batch_size = len(examples[first_label])
+
+            for i in range(batch_size):
+                label_vector = []
+                for col in final_label_list:
+                    if col in existing_necessary:
+                        label_vector.append(int(examples[col][i]))
+                    else:
+                        label_vector.append(0)
+                labels.append(label_vector)
+
+            examples['labels'] = labels
+            return examples
+
+        combined_dataset = Dataset.from_pandas(combined_df_clean.reset_index(drop=True))
+        combined_dataset = combined_dataset.map(tokenize_function_combined, batched=True)
+        combined_dataset = combined_dataset.map(prepare_labels_combined, batched=True)
+
+        cols_to_remove = [col for col in combined_dataset.column_names
+                          if col not in ['input_ids', 'attention_mask', 'labels']]
+
+        if cols_to_remove:
+            combined_dataset = combined_dataset.remove_columns(cols_to_remove)
+
+        combined_dataset.set_format('torch')
+
+        curriculum_callback = CurriculumLearningCallback(
+            switch_epoch=curriculum_config['switch_epoch'],
+            tier1_dataset=train_dataset,
+            combined_dataset=combined_dataset
+        )
+
+        st.success(f"✅ Curriculum: Tier 1 → Combined at epoch {curriculum_config['switch_epoch']}")
+
+    # Early stopping callback
+    if config.get("use_early_stopping", True):
+        early_stop_callback = CurriculumEarlyStoppingCallback(
+            patience=config.get("early_stopping_patience", 3),
+            threshold=config.get("early_stopping_threshold", 0.001),
+            curriculum_callback=curriculum_callback
+        )
+    else:
+        early_stop_callback = None
+
+    # ========================================================================
+    # COMBINE ALL CALLBACKS
+    # ========================================================================
+
+    all_callbacks = [monitor_callback]  # Monitor first
+
+    if early_stop_callback:  # Only add if enabled
+        all_callbacks.append(early_stop_callback)
+
+    if curriculum_callback:
+        all_callbacks.append(curriculum_callback)
+
+    # ========================================================================
+    # CREATE TRAINER
+    # ========================================================================
 
     trainer = HierarchicalTrainer(
         model=training_session.model,
@@ -2119,76 +2895,79 @@ def start_training(
         data_collator=DataCollatorWithPadding(training_session.tokenizer),
         compute_metrics=compute_metrics_for_trainer(
             final_label_list,
-            main_label_names=main_label_names  # NEW: Pass main labels
+            main_label_names=main_label_names
         ),
         class_weights=class_weights,
         teacher_forcing_ratio=config.get("teacher_forcing_ratio", 0.5),
-        callbacks=[
-            EarlyStoppingCallback(
-                early_stopping_patience=3,  # Stop if no improvement for 3 epochs
-                early_stopping_threshold=0.001  # Minimum improvement considered significant
-            )
-        ]
+        callbacks=all_callbacks
     )
 
-    # Train
+    # Set trainer reference for curriculum callback
+    if curriculum_callback is not None:
+        curriculum_callback.trainer = trainer
+
+    # ========================================================================
+    # TRAIN WITH MONITORING
+    # ========================================================================
+
     session_state['training_active'] = True
     session_state['training_history'] = []
     session_state['current_epoch'] = 0
 
-    st.info("🎓 Training started...")
+    st.info("🎓 Training started with real-time monitoring...")
 
     try:
-        progress_placeholder = st.empty()
-        status_placeholder = st.empty()
+        # Training happens here - monitor updates automatically
+        train_result = trainer.train()
 
-        with st.spinner("Training in progress..."):
-            train_result = trainer.train()
-            status_placeholder.success("✅ Training completed!")
+        # Check if stopped by user
+        if session_state.get('training_stopped_by_user'):
+            st.warning("⚠️ Training stopped by user")
+        else:
+            st.success("✅ Training completed!")
 
         # Get training history
         history = [log for log in trainer.state.log_history if 'epoch' in log]
         session_state['training_history'] = history
         session_state['current_epoch'] = config["num_epochs"]
 
-        # Evaluate on test set
+        # ====================================================================
+        # EVALUATE ON TEST SET
+        # ====================================================================
+
         st.info("📊 Evaluating on test set...")
         test_results = trainer.evaluate(eval_dataset=test_dataset)
 
-        # Calculate sublabel-only metrics for fair comparison
-        st.info("📊 Calculating sublabel-only metrics for fair comparison...")
-
+        # Calculate sublabel-only metrics
         if config["use_hierarchy"] and config["predict_main_labels"]:
-            # Hierarchical model - need to exclude main categories
             from core.model_training import extract_sublabel_metrics
 
             sublabel_metrics = extract_sublabel_metrics(
                 test_results,
                 final_label_list,
-                list(label_structure.keys())  # Main category names
+                list(label_structure.keys())
             )
 
-            # Add to test results
             test_results['eval_f1_micro_sublabels'] = sublabel_metrics['f1_micro_sublabels']
             test_results['eval_f1_macro_sublabels'] = sublabel_metrics['f1_macro_sublabels']
-
-            st.info(f"✅ Sublabel-only F1: {sublabel_metrics['f1_micro_sublabels']:.3f} (fair comparison metric)")
         else:
-            # Flat model - all labels are sublabels
             test_results['eval_f1_micro_sublabels'] = test_results.get('eval_f1_micro', 0)
             test_results['eval_f1_macro_sublabels'] = test_results.get('eval_f1_macro', 0)
 
         session_state['test_results'] = test_results
 
         st.success(f"✅ Test F1 Micro: {test_results.get('eval_f1_micro', 0):.3f}")
-        st.success(f"✅ Test F1 Macro: {test_results.get('eval_f1_macro', 0):.3f}")
 
-        # Save model
+        # ====================================================================
+        # SAVE MODEL
+        # ====================================================================
+
         st.info("💾 Saving model...")
         final_model_path = output_dir / "final_model"
         training_session.model.save_pretrained(final_model_path)
         training_session.tokenizer.save_pretrained(final_model_path)
 
+        # Compute optimal thresholds
         st.info("🎯 Computing optimal thresholds...")
         test_predictions = trainer.predict(test_dataset)
         predictions_probs = torch.sigmoid(torch.tensor(test_predictions.predictions)).numpy()
@@ -2211,8 +2990,6 @@ def start_training(
                 'threshold': float(best_threshold),
                 'f1_at_threshold': float(best_f1)
             }
-
-        st.success(f"✅ Computed optimal thresholds for {len(final_label_list)} labels")
 
         # Save training info
         training_info = {
@@ -2238,18 +3015,11 @@ def start_training(
         st.info("📊 Creating visualizations...")
 
         try:
-            viz_fig = visualize_training_history(history, output_dir)
-            if viz_fig:
-                st.success("✅ Training history plot saved")
+            visualize_training_history(history, output_dir)
+            visualize_test_results(test_results, final_label_list, output_dir)
+            st.success("✅ Visualizations saved")
         except Exception as e:
-            st.warning(f"⚠️ Could not create training history plot: {e}")
-
-        try:
-            results_fig = visualize_test_results(test_results, final_label_list, output_dir)
-            if results_fig:
-                st.success("✅ Test results plot saved")
-        except Exception as e:
-            st.warning(f"⚠️ Could not create test results plot: {e}")
+            st.warning(f"⚠️ Could not create visualizations: {e}")
 
         # Save experiment info
         experiment_info = {
@@ -2259,7 +3029,15 @@ def start_training(
             'test_results': test_results,
             'label_structure': label_structure,
             'model_path': str(final_model_path),
-            'training_completed': True
+            'training_completed': True,
+
+            # ✅ COMPLETE DATASET TRACKING
+            'dataset': dataset_metadata,
+
+            # ✅ CURRICULUM INFO
+            'curriculum_learning': session_state.get('curriculum_config', {
+                'enabled': False
+            }) if session_state.get('curriculum_config') else {'enabled': False}
         }
 
         with open(output_dir / "experiment_info.json", "w") as f:
@@ -2267,52 +3045,15 @@ def start_training(
 
         session_state['training_complete'] = True
         session_state['training_output_dir'] = output_dir
-
+        session_state['training_just_completed'] = True  # ← ADD THIS LINE
         st.success("✅ Training completed successfully!")
         st.balloons()
-
-        # Show summary
-        st.markdown("---")
-        st.markdown("### 🎉 Training Summary")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.metric("Final F1 Micro", f"{test_results.get('eval_f1_micro', 0):.3f}")
-        with col2:
-            st.metric("Final F1 Macro", f"{test_results.get('eval_f1_macro', 0):.3f}")
-        with col3:
-            st.metric("Total Epochs", config["num_epochs"])
-
-        st.info(f"💾 Model saved to: `{final_model_path}`")
-        st.info(f"📊 View detailed results in the **Results** tab")
 
     except Exception as e:
         st.error(f"❌ Training failed: {e}")
         import traceback
         with st.expander("Error details"):
             st.code(traceback.format_exc())
-
-        # Try to save partial results
-        try:
-            st.info("💾 Attempting to save partial training state...")
-
-            if session_state.get('training_history'):
-                history = session_state['training_history']
-
-                partial_info = {
-                    'config': config,
-                    'training_history': history,
-                    'error': str(e),
-                    'failed_at': datetime.now().isoformat()
-                }
-
-                with open(output_dir / "partial_training.json", "w") as f:
-                    json.dump(partial_info, f, indent=2)
-
-                st.success(f"✅ Partial results saved to {output_dir}")
-        except:
-            pass
 
     finally:
         session_state['training_active'] = False
