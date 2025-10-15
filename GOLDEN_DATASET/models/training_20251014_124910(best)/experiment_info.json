@@ -1,0 +1,185 @@
+{
+  "experiment_name": "training_20251014_124910",
+  "created_at": "2025-10-14T13:59:57.728227",
+  "config": {
+    "base_model": "roberta-base",
+    "use_hierarchy": false,
+    "gated_hierarchy": true,
+    "gate_threshold": 0.5,
+    "predict_main_labels": false,
+    "hierarchy_config": null,
+    "hidden_size": 768,
+    "hierarchical_hidden_size": 768,
+    "num_hidden_layers": 3,
+    "dropout": 0.15,
+    "attention_dropout": 0.1,
+    "use_weighted_loss": true,
+    "use_focal_loss": true,
+    "focal_gamma": 4.0,
+    "teacher_forcing_ratio": 0.7,
+    "num_epochs": 13,
+    "batch_size": 12,
+    "gradient_accumulation_steps": 1,
+    "learning_rate": 2e-05,
+    "warmup_steps": 500,
+    "weight_decay": 0.02,
+    "max_length": 512,
+    "label_smoothing": 0.0,
+    "test_size": 0.2,
+    "validation_size": 0.1,
+    "random_seed": 42,
+    "stratify_by": null,
+    "experiment_name": "training_20251014_124910"
+  },
+  "test_results": {
+    "eval_loss": 0.26592376828193665,
+    "eval_f1_micro": 0.7219931271477663,
+    "eval_f1_macro": 0.6935441677357943,
+    "eval_f1_micro_all": 0.7219931271477663,
+    "eval_f1_macro_all": 0.6935441677357943,
+    "eval_f1_micro_sublabels": 0.7219931271477663,
+    "eval_f1_macro_sublabels": 0.6935441677357943,
+    "eval_f1_Illness": 0.8685874912157414,
+    "eval_f1_Accident": 0.7172413793103448,
+    "eval_f1_Other": 0.6311475409836066,
+    "eval_f1_Material_Physical": 0.5714285714285714,
+    "eval_f1_Spirits_Gods": 0.739946380697051,
+    "eval_f1_Witchcraft_Sorcery": 0.7668393782383419,
+    "eval_f1_Rule_Violation_Taboo": 0.7100977198697068,
+    "eval_f1_Physical_Material": 0.680577849117175,
+    "eval_f1_Technical_Specialist": 0.647887323943662,
+    "eval_f1_Divination": 0.5274725274725275,
+    "eval_f1_Shaman_Medium_Healer": 0.6744186046511628,
+    "eval_f1_Priest_High_Religion": 0.7868852459016393,
+    "eval_runtime": 20.1691,
+    "eval_samples_per_second": 49.581,
+    "eval_steps_per_second": 4.165,
+    "epoch": 13.0
+  },
+  "label_structure": {
+    "FLAT": {
+      "main_label": "FLAT",
+      "sublabels": [
+        "Illness",
+        "Accident",
+        "Other",
+        "Material_Physical",
+        "Spirits_Gods",
+        "Witchcraft_Sorcery",
+        "Rule_Violation_Taboo",
+        "Physical_Material",
+        "Technical_Specialist",
+        "Divination",
+        "Shaman_Medium_Healer",
+        "Priest_High_Religion"
+      ],
+      "enabled": true
+    }
+  },
+  "model_path": "models/training_20251014_124910/final_model",
+  "training_completed": true,
+  "dataset": {
+    "num_passages": 5000,
+    "num_labels": 12,
+    "label_columns": [
+      "Illness",
+      "Accident",
+      "Other",
+      "Material_Physical",
+      "Spirits_Gods",
+      "Witchcraft_Sorcery",
+      "Rule_Violation_Taboo",
+      "Physical_Material",
+      "Technical_Specialist",
+      "Divination",
+      "Shaman_Medium_Healer",
+      "Priest_High_Religion"
+    ],
+    "passage_column": "Passage",
+    "source_info": {
+      "source": "tiered_object",
+      "source_type": "combined",
+      "name": "tiered_scored_embedded_cleaned_raw__Altogether_Dataset_RACoded_Combined_20251011_0904_0904_0932_manual_1039",
+      "tier_choice": "Tier 1 + Tier 2 Combined (All quality data)",
+      "path": "data/objects/tiered/tiered_scored_embedded_cleaned_raw__Altogether_Dataset_RACoded_Combined_20251011_0904_0904_0932_manual_1039",
+      "file_path": "data/objects/tiered/tiered_scored_embedded_cleaned_raw__Altogether_Dataset_RACoded_Combined_20251011_0904_0904_0932_manual_1039/data.xlsx",
+      "num_passages": 5000,
+      "loaded_at": "2025-10-14T12:51:12.677618",
+      "has_quality_scores": true
+    },
+    "has_quality_scores": true,
+    "passage_stats": {
+      "mean_length": 787.8484,
+      "median_length": 656.0,
+      "min_length": 14,
+      "max_length": 12859
+    },
+    "label_distribution": {
+      "Illness": {
+        "count": 3379,
+        "frequency": 0.6758
+      },
+      "Accident": {
+        "count": 359,
+        "frequency": 0.0718
+      },
+      "Other": {
+        "count": 1636,
+        "frequency": 0.3272
+      },
+      "Material_Physical": {
+        "count": 997,
+        "frequency": 0.1994
+      },
+      "Spirits_Gods": {
+        "count": 1593,
+        "frequency": 0.3186
+      },
+      "Witchcraft_Sorcery": {
+        "count": 559,
+        "frequency": 0.1118
+      },
+      "Rule_Violation_Taboo": {
+        "count": 726,
+        "frequency": 0.1452
+      },
+      "Physical_Material": {
+        "count": 2347,
+        "frequency": 0.4694
+      },
+      "Technical_Specialist": {
+        "count": 381,
+        "frequency": 0.0762
+      },
+      "Divination": {
+        "count": 233,
+        "frequency": 0.0466
+      },
+      "Shaman_Medium_Healer": {
+        "count": 716,
+        "frequency": 0.1432
+      },
+      "Priest_High_Religion": {
+        "count": 135,
+        "frequency": 0.027
+      }
+    },
+    "dataset_hash": "6d8c5c0fa99b70e0",
+    "quality_stats": {
+      "consistency_mean": 0.6348914210904135,
+      "rerank_mean": 0.44846698122849604,
+      "composite_mean": 0.5416792011594547
+    },
+    "splits": {
+      "train": 3600,
+      "validation": 400,
+      "test": 1000,
+      "train_pct": 72.0,
+      "val_pct": 8.0,
+      "test_pct": 20.0
+    }
+  },
+  "curriculum_learning": {
+    "enabled": false
+  }
+}
