@@ -30,3 +30,4 @@ temp
 
 GOLDEN_DATASET/ATT91541.env
 /HRAF_NLP/HRAF_MultiLabel_SubClasses_Kfolds/Model_9_JohnRoberta
+*.safetensors
