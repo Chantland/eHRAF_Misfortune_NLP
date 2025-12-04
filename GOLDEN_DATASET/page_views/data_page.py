@@ -24,8 +24,7 @@ from core.data_objects import (
     DataObject, DataObjectManager, DataPipeline, PipelineStage
 )
 from core.data_preparation import DataAnalyzer, DataSegmenter
-from core.discovery_architecture import GoldenDatasetFinder
-
+from core.quality_scoring import QualityScorer
 
 # ============================================================================
 # MAIN RENDER FUNCTION
@@ -51,7 +50,7 @@ def render():
         load_dotenv()
 
         # Don't catch exceptions - let them show
-        finder = GoldenDatasetFinder(
+        finder = QualityScorer(
             voyage_api_key=os.getenv("VOYAGE_API_KEY"),
             pinecone_api_key=os.getenv("PINECONE_API_KEY"),
             index_name="hraf-misfortune-test",
@@ -177,7 +176,12 @@ def render_object_browser():
 
     # Display objects
     for obj_meta in all_objects:
-        with st.expander(f"📦 {obj_meta['name']} ({obj_meta['stage'].upper()})", expanded=False):
+        # Add source indicator
+        source_icon = "📦" if obj_meta.get('source') == 'primary' else "📌"
+        source_label = "" if obj_meta.get('source') == 'primary' else " (shared)"
+
+        with st.expander(f"{source_icon} {obj_meta['name']}{source_label} ({obj_meta['stage'].upper()})",
+                         expanded=False):
             col1, col2, col3 = st.columns(3)
 
             with col1:
@@ -194,6 +198,9 @@ def render_object_browser():
                 st.caption(f"Created: {obj_meta.get('created_at', 'Unknown')[:10]}")
                 if obj_meta.get('parent'):
                     st.caption(f"Parent: {obj_meta['parent']}")
+                # Show source
+                if obj_meta.get('source') == 'fallback':
+                    st.caption("📌 From _data (shared)")
 
             # Load button
             if st.button(f"📂 Load '{obj_meta['name']}'", key=f"load_{obj_meta['name']}_{obj_meta['stage']}"):
@@ -251,6 +258,18 @@ def load_data_object(name: str, stage: PipelineStage):
                 st.error(f"❌ Could not load {name}")
                 return
 
+            # ✅ FIX: Ensure stable IDs exist
+            if 'passage_id' not in data_obj.df.columns:
+                st.warning("⚠️ Adding stable IDs to loaded data...")
+                from components.data_loader import SmartDataLoader
+                data_obj.df = SmartDataLoader.add_stable_ids(
+                    data_obj.df,
+                    data_obj.passage_col
+                )
+                # Save the updated dataframe back
+                manager.save(data_obj)
+                st.success("✅ Added stable IDs and saved")
+
             # Set as current
             st.session_state['current_data_object'] = data_obj
 
@@ -262,9 +281,10 @@ def load_data_object(name: str, stage: PipelineStage):
             st.session_state['namespace'] = data_obj.namespace
 
             # Populate cache if available
+            # NOTE: embeddings_cache is now {stable_id: pinecone_id}, not {df.index: pinecone_id}
             if data_obj.has_embeddings or data_obj.has_scores:
                 st.session_state['cache'] = {
-                    'passage_id_map': data_obj.embeddings_cache if data_obj.has_embeddings else {},
+                    'stable_id_to_pinecone': data_obj.embeddings_cache if data_obj.has_embeddings else {},
                     'df_summary': data_obj.scores_cache if data_obj.has_scores else None
                 }
 
@@ -280,7 +300,7 @@ def load_data_object(name: str, stage: PipelineStage):
 
 
 def initialize_finder():
-    """Initialize the GoldenDatasetFinder"""
+    """Initialize the QualityScorer"""
     try:
         from dotenv import load_dotenv
         import os
@@ -300,14 +320,12 @@ def initialize_finder():
             return False
 
         with st.spinner("Connecting to Voyage AI and Pinecone..."):
-            finder = GoldenDatasetFinder(
-                voyage_api_key=voyage_key,
-                pinecone_api_key=pinecone_key,
+            scorer = QualityScorer(
                 index_name="hraf-misfortune-test",
                 region="us-east-1"
             )
 
-            st.session_state['finder'] = finder
+            st.session_state['finder'] = scorer  # Keep key name for compatibility
             return True
 
     except Exception as e:
@@ -826,6 +844,11 @@ def create_raw_data_object(config: dict, file_bytes: bytes):
                     if df[label].dtype not in ['int64', 'float64', 'Int64']:
                         df[label] = pd.to_numeric(df[label], errors='coerce').fillna(0).astype(int)
 
+                # ✅ FIX: Add stable IDs using SmartDataLoader
+                from components.data_loader import SmartDataLoader
+                df = SmartDataLoader.add_stable_ids(df, config['passage_col'])
+                st.info(f"✅ Generated stable IDs for {len(df)} passages")
+
                 # Create RAW data object
                 pipeline = st.session_state.pipeline
 
@@ -963,6 +986,20 @@ def render_raw_actions(obj: DataObject):
                     with st.spinner("Cleaning..."):
                         df_cleaned = analyzer.apply_cleaning(selected_actions)
 
+                        # ✅ FIX: Preserve stable IDs through cleaning
+                        if 'passage_id' in obj.df.columns:
+                            # Map stable IDs to cleaned data
+                            passage_ids = obj.df.set_index(obj.passage_col)['passage_id'].to_dict()
+                            df_cleaned['passage_id'] = df_cleaned[obj.passage_col].map(passage_ids)
+
+                            # Generate new IDs for any new/modified passages
+                            missing_ids = df_cleaned['passage_id'].isna()
+                            if missing_ids.any():
+                                from components.data_loader import SmartDataLoader
+                                for idx in df_cleaned[missing_ids].index:
+                                    text = df_cleaned.loc[idx, obj.passage_col]
+                                    df_cleaned.loc[idx, 'passage_id'] = SmartDataLoader._generate_stable_id(text)
+
                         # Create CLEANED data object
                         pipeline = st.session_state.pipeline
                         cleaned_obj = pipeline.create_cleaned(
@@ -1047,23 +1084,25 @@ def render_cleaned_actions(obj: DataObject):
         if st.button("📂 Load Cached Embeddings"):
             embeddings = cache_manager.load_embeddings(obj.namespace)
 
-            # FILTER embeddings to only include passages in current dataframe
-            valid_indices = set(obj.df.index.tolist())
-            filtered_embeddings = {
-                idx: pid for idx, pid in embeddings.items()
-                if idx in valid_indices
-            }
+            # ✅ FIX: Rebuild mapping using stable IDs
+            if 'passage_id' in obj.df.columns:
+                # Rebuild the mapping based on stable IDs
+                rebuilt_map = {}
+                for idx in obj.df.index:
+                    stable_id = obj.df.loc[idx, 'passage_id']
+                    pinecone_id = f"passage_{stable_id}"
 
-            if len(filtered_embeddings) < len(embeddings):
-                removed = len(embeddings) - len(filtered_embeddings)
-                st.info(f"ℹ️ Filtered out {removed} embeddings for removed passages")
+                    # Check if this exists in cached embeddings
+                    if pinecone_id in [v for v in embeddings.values()]:
+                        rebuilt_map[idx] = pinecone_id
 
-            if len(filtered_embeddings) == 0:
-                st.error("❌ No embeddings match current dataframe. Generate new embeddings instead.")
-                return
+                obj.embeddings_cache = rebuilt_map
+                st.success(f"✅ Loaded {len(rebuilt_map)} cached embeddings (mapped by stable IDs)")
+            else:
+                # Fallback to original cached mapping
+                obj.embeddings_cache = embeddings
+                st.warning("⚠️ No stable IDs - using original index mapping")
 
-            obj.embeddings_cache = filtered_embeddings
-            st.success(f"✅ Loaded {len(filtered_embeddings)} cached embeddings")
             st.rerun()
 
     batch_size = st.slider("Batch size:", 8, 64, 32)
@@ -1114,334 +1153,976 @@ def render_embedded_actions(obj: DataObject):
 
 
 def render_scored_actions(obj: DataObject):
-    """Actions for SCORED data"""
+    """Actions for SCORED data - ENHANCED with quality exploration"""
 
     st.markdown("### 🎯 Create Training Tiers")
 
-    st.info("Create quality-stratified training sets with optional label targeting")
+    st.info("Create quality-stratified training sets with dynamic threshold control")
 
-    # Show score distribution
-    with st.expander("📊 Score Distribution", expanded=True):
-        col1, col2 = st.columns(2)
+    # ========================================================================
+    # QUALITY SCORE EXPLORATION
+    # ========================================================================
 
-        with col1:
-            st.markdown("**Consistency**")
-            st.metric("Mean", f"{obj.scores_cache['consistency_avg'].mean():.3f}")
-            st.metric("Median", f"{obj.scores_cache['consistency_avg'].median():.3f}")
-
-        with col2:
-            st.markdown("**Rerank**")
-            st.metric("Mean", f"{obj.scores_cache['rerank_avg'].mean():.3f}")
-            st.metric("Median", f"{obj.scores_cache['rerank_avg'].median():.3f}")
+    with st.expander("📊 Explore Quality Score Distribution", expanded=True):
+        render_quality_score_explorer(obj)
 
     st.markdown("---")
 
-    # Configuration method
+    # ========================================================================
+    # DYNAMIC TIER PREVIEW
+    # ========================================================================
+
+    st.markdown("### ⚙️ Configure Tiers with Live Preview")
+
+    # Get recommended thresholds based on actual data
+    recommendations = calculate_dynamic_thresholds(obj)
+
+    st.info(f"""
+    💡 **Dynamic Recommendations** (based on your data):
+
+    - **Tier 1:** Top {recommendations['tier1_percentile']:.0f}th percentile quality
+    - **Tier 2:** Top {recommendations['tier2_percentile']:.0f}th percentile quality
+    - Targets {recommendations['target_tier1_pct'] * 100:.0f}% Tier 1, {recommendations['target_tier2_pct'] * 100:.0f}% Tier 2
+    """)
+
+    # Configuration tabs
     config_method = st.radio(
         "Configuration method:",
-        ["Quick Presets", "Advanced + Label Targeting"],
-        horizontal=True,
+        ["🎯 Smart Presets (Data-Aware)", "🔧 Manual Thresholds + Preview", "🎲 Skip Quality Filtering"],
+        horizontal=False,
         key="tier_config_method"
     )
 
-    if config_method == "Quick Presets":
-        render_quick_tier_presets(obj)
+    if config_method == "🎯 Smart Presets (Data-Aware)":
+        render_smart_presets(obj, recommendations)
+    elif config_method == "🔧 Manual Thresholds + Preview":
+        render_manual_thresholds_with_preview(obj, recommendations)
     else:
-        render_advanced_tier_config(obj)
+        render_skip_quality_tiering(obj)
 
 
-def render_quick_tier_presets(obj: DataObject):
-    """Simple preset-based tier creation"""
+def render_quality_score_explorer(obj: DataObject):
+    """Interactive quality score distribution explorer"""
 
-    st.markdown("#### Quick Tier Creation")
+    scores_df = obj.scores_cache
 
-    preset = st.selectbox(
-        "Configuration preset:",
-        ["Balanced", "Conservative (High Quality)", "Aggressive (More Data)"]
-    )
+    if scores_df is None or len(scores_df) == 0:
+        st.warning("No scores available")
+        return
 
-    # Name for tiered object
-    default_name = f"tiered_{obj.name}_{datetime.now().strftime('%H%M')}"
-    tiered_name = st.text_input("New object name:", value=default_name, key="tier_name_input")
+    # Summary statistics
+    col1, col2, col3, col4 = st.columns(4)
 
-    if st.button("🎯 Create Tiers", type="primary"):
-        with st.spinner("Creating tiers..."):
-            segmenter = DataSegmenter(obj.df, obj.scores_cache, obj.label_columns)
+    with col1:
+        st.metric("Scored Passages", len(scores_df))
 
-            # Configure based on preset
-            if preset == "Balanced":
-                tier1_config = {'min_consistency': 0.65, 'min_rerank': 0.45, 'target_size': int(len(obj.df) * 0.12)}
-                tier2_config = {'min_consistency': 0.45, 'min_rerank': 0.30, 'target_size': int(len(obj.df) * 0.25)}
-            elif preset == "Conservative (High Quality)":
-                tier1_config = {'min_consistency': 0.70, 'min_rerank': 0.50, 'target_size': int(len(obj.df) * 0.10)}
-                tier2_config = {'min_consistency': 0.50, 'min_rerank': 0.35, 'target_size': int(len(obj.df) * 0.22)}
-            else:  # Aggressive
-                tier1_config = {'min_consistency': 0.60, 'min_rerank': 0.40, 'target_size': int(len(obj.df) * 0.15)}
-                tier2_config = {'min_consistency': 0.40, 'min_rerank': 0.25, 'target_size': int(len(obj.df) * 0.28)}
+    with col2:
+        mean_cons = scores_df['consistency_avg'].mean()
+        st.metric("Avg Consistency", f"{mean_cons:.3f}")
+        st.caption(f"Median: {scores_df['consistency_avg'].median():.3f}")
 
-            tier1, tier2, inference, metadata = segmenter.create_quality_tiers(
-                tier1_config, tier2_config
-            )
+    with col3:
+        mean_rerank = scores_df['rerank_avg'].mean()
+        st.metric("Avg Rerank", f"{mean_rerank:.3f}")
+        st.caption(f"Median: {scores_df['rerank_avg'].median():.3f}")
 
-            save_tiered_object(obj, tiered_name, tier1, tier2, inference, metadata)
+    with col4:
+        composite = (scores_df['consistency_avg'] + scores_df['rerank_avg']) / 2
+        st.metric("Avg Composite", f"{composite.mean():.3f}")
+        st.caption(f"Median: {composite.median():.3f}")
 
+    # Distribution plots
+    import matplotlib.pyplot as plt
 
-def render_advanced_tier_config(obj: DataObject):
-    """Advanced configuration with label targeting"""
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
-    st.markdown("#### Advanced Configuration")
+    # Consistency distribution
+    axes[0].hist(scores_df['consistency_avg'], bins=30, color='#2E86AB', alpha=0.7, edgecolor='black')
+    axes[0].axvline(scores_df['consistency_avg'].median(), color='red', linestyle='--',
+                    label=f'Median: {scores_df["consistency_avg"].median():.3f}')
+    axes[0].set_xlabel('Consistency Score')
+    axes[0].set_ylabel('Frequency')
+    axes[0].set_title('Consistency Distribution')
+    axes[0].legend()
+    axes[0].grid(alpha=0.3)
 
-    # Analyze label distribution
-    label_stats = []
-    for label in obj.label_columns:
-        count = int((obj.df[label] == 1).sum())
-        pct = (count / len(obj.df)) * 100
-        label_stats.append({
-            'label': label,
-            'count': count,
-            'percentage': pct,
-            'is_rare': pct < 10
+    # Rerank distribution
+    axes[1].hist(scores_df['rerank_avg'], bins=30, color='#A23B72', alpha=0.7, edgecolor='black')
+    axes[1].axvline(scores_df['rerank_avg'].median(), color='red', linestyle='--',
+                    label=f'Median: {scores_df["rerank_avg"].median():.3f}')
+    axes[1].set_xlabel('Rerank Score')
+    axes[1].set_ylabel('Frequency')
+    axes[1].set_title('Rerank Distribution')
+    axes[1].legend()
+    axes[1].grid(alpha=0.3)
+
+    # Composite distribution
+    axes[2].hist(composite, bins=30, color='#27AE60', alpha=0.7, edgecolor='black')
+    axes[2].axvline(composite.median(), color='red', linestyle='--',
+                    label=f'Median: {composite.median():.3f}')
+    axes[2].set_xlabel('Composite Score')
+    axes[2].set_ylabel('Frequency')
+    axes[2].set_title('Composite Distribution')
+    axes[2].legend()
+    axes[2].grid(alpha=0.3)
+
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+    # Percentile table
+    st.markdown("**Score Percentiles:**")
+
+    percentiles = [10, 25, 50, 75, 90, 95]
+    percentile_data = []
+
+    for p in percentiles:
+        percentile_data.append({
+            'Percentile': f'{p}th',
+            'Consistency': f"{scores_df['consistency_avg'].quantile(p / 100):.3f}",
+            'Rerank': f"{scores_df['rerank_avg'].quantile(p / 100):.3f}",
+            'Composite': f"{composite.quantile(p / 100):.3f}"
         })
 
-    label_stats_df = pd.DataFrame(label_stats).sort_values('percentage')
+    st.dataframe(pd.DataFrame(percentile_data), hide_index=True, width='stretch')
 
-    # Show distribution
-    with st.expander("📊 Label Distribution Analysis", expanded=True):
-        st.dataframe(
-            label_stats_df.assign(
-                Percentage=label_stats_df['percentage'].apply(lambda x: f"{x:.1f}%"),
-                Rare=label_stats_df['is_rare'].apply(lambda x: "⚠️ Rare" if x else "✓")
-            )[['label', 'count', 'Percentage', 'Rare']],
-            hide_index=True,
-            width='stretch'
+    st.caption("💡 Use percentiles to set thresholds that capture the right amount of data")
+
+
+def calculate_dynamic_thresholds(obj: DataObject) -> Dict:
+    """Calculate recommended thresholds based on actual score distribution"""
+
+    scores_df = obj.scores_cache
+    total_passages = len(obj.df)
+
+    # MORE AGGRESSIVE DEFAULTS
+    target_tier1_pct = 0.18  # 18% for tier 1 (was 15%)
+    target_tier2_pct = 0.30  # 30% for tier 2 (was 27%)
+    target_total_pct = target_tier1_pct + target_tier2_pct  # 48% total training (was 42%)
+
+    # Calculate what percentile these represent
+    tier1_percentile = (1 - target_tier1_pct) * 100  # Top 18% = 82nd percentile
+    tier2_percentile = (1 - target_total_pct) * 100  # Top 48% = 52nd percentile
+
+    # Get actual score values at these percentiles
+    composite = (scores_df['consistency_avg'] + scores_df['rerank_avg']) / 2
+
+    tier1_composite_threshold = composite.quantile(tier1_percentile / 100)
+    tier2_composite_threshold = composite.quantile(tier2_percentile / 100)
+
+    tier1_cons = scores_df['consistency_avg'].quantile(tier1_percentile / 100)
+    tier1_rerank = scores_df['rerank_avg'].quantile(tier1_percentile / 100)
+
+    tier2_cons = scores_df['consistency_avg'].quantile(tier2_percentile / 100)
+    tier2_rerank = scores_df['rerank_avg'].quantile(tier2_percentile / 100)
+
+    # ✅ SANITY CHECK: If thresholds are absurdly high, use fallbacks
+    if tier1_cons > 0.75 or tier1_rerank > 0.65:
+        st.warning("⚠️ Calculated thresholds very high. Using relaxed fallbacks.")
+        tier1_cons = min(tier1_cons, 0.60)
+        tier1_rerank = min(tier1_rerank, 0.45)
+
+    if tier2_cons > 0.65 or tier2_rerank > 0.55:
+        tier2_cons = min(tier2_cons, 0.45)
+        tier2_rerank = min(tier2_rerank, 0.30)
+
+    return {
+        'target_tier1_pct': target_tier1_pct,
+        'target_tier2_pct': target_tier2_pct,
+        'tier1_percentile': tier1_percentile,
+        'tier2_percentile': tier2_percentile,
+
+        'tier1_consistency': tier1_cons,
+        'tier1_rerank': tier1_rerank,
+        'tier1_composite': tier1_composite_threshold,
+
+        'tier2_consistency': tier2_cons,
+        'tier2_rerank': tier2_rerank,
+        'tier2_composite': tier2_composite_threshold,
+    }
+
+
+def render_smart_presets(obj: DataObject, recommendations: Dict):
+    """Data-aware presets that adapt to actual score distribution"""
+
+    st.markdown("#### 🎯 Smart Presets")
+
+    scores_df = obj.scores_cache
+    total_passages = len(obj.df)
+
+    # ✅ MUCH MORE AGGRESSIVE PRESETS
+    presets = {
+        "Aggressive (Recommended for Low Scores)": {
+            'tier1_pct': 0.20,
+            'tier2_pct': 0.32,
+            'description': "Use more data with lower quality bars. Best when scores are generally low."
+        },
+        "Balanced": {
+            'tier1_pct': 0.18,
+            'tier2_pct': 0.30,
+            'description': "Middle ground - 48% total training"
+        },
+        "Conservative (Only if Scores are High)": {
+            'tier1_pct': 0.15,
+            'tier2_pct': 0.27,
+            'description': "Strict quality. Only use if most passages score >0.60"
+        }
+    }
+
+    # ✅ ADD: Warn if scores are low
+    median_composite = ((scores_df['consistency_avg'] + scores_df['rerank_avg']) / 2).median()
+
+    if median_composite < 0.50:
+        st.warning(f"""
+        ⚠️ **Low quality scores detected** (median composite: {median_composite:.3f})
+
+        Your quality scores are lower than typical. This usually means:
+        - High inter-rater disagreement in the original labels
+        - Confused/ambiguous labels (like Material_Physical)
+        - Conservative reranking
+
+        **Recommendation:** Use "Aggressive" preset or skip quality filtering entirely.
+        """)
+        default_preset = 0  # Aggressive
+    else:
+        default_preset = 1  # Balanced
+
+    preset_choice = st.radio(
+        "Select preset:",
+        list(presets.keys()),
+        index=default_preset,
+        key="smart_preset_choice"
+    )
+
+    # Rest of function...
+
+    preset = presets[preset_choice]
+
+    # Calculate thresholds for this preset
+    tier1_size_target = int(total_passages * preset['tier1_pct'])
+    tier2_size_target = int(total_passages * preset['tier2_pct'])
+
+    tier1_percentile = (1 - preset['tier1_pct']) * 100
+    tier2_percentile = (1 - (preset['tier1_pct'] + preset['tier2_pct'])) * 100
+
+    composite = (scores_df['consistency_avg'] + scores_df['rerank_avg']) / 2
+
+    tier1_cons = scores_df['consistency_avg'].quantile(tier1_percentile / 100)
+    tier1_rerank = scores_df['rerank_avg'].quantile(tier1_percentile / 100)
+
+    tier2_cons = scores_df['consistency_avg'].quantile(tier2_percentile / 100)
+    tier2_rerank = scores_df['rerank_avg'].quantile(tier2_percentile / 100)
+
+    # Show what this preset will do
+    st.info(f"""
+    **{preset_choice}**
+
+    {preset['description']}
+
+    **Tier 1:** ~{tier1_size_target} passages ({preset['tier1_pct'] * 100:.0f}%)
+    - Consistency ≥ {tier1_cons:.3f}
+    - Rerank ≥ {tier1_rerank:.3f}
+
+    **Tier 2:** ~{tier2_size_target} passages ({preset['tier2_pct'] * 100:.0f}%)
+    - Consistency ≥ {tier2_cons:.3f}
+    - Rerank ≥ {tier2_rerank:.3f}
+
+    **Total Training:** ~{tier1_size_target + tier2_size_target} passages ({(preset['tier1_pct'] + preset['tier2_pct']) * 100:.0f}%)
+    """)
+
+    # No-label passage control
+    st.markdown("---")
+    st.markdown("**No-Label Passage Control**")
+
+    no_label_count = (obj.df[obj.label_columns].sum(axis=1) == 0).sum()
+    st.caption(f"Dataset contains {no_label_count} passages with no labels")
+
+    no_label_strategy = st.radio(
+        "Include passages with no labels:",
+        ["Remove all", "Include limited number", "Include all"],
+        index=0,
+        key="smart_preset_no_label",
+        help="Control how many passages with no active labels are included in training"
+    )
+
+    max_no_label = 0  # default: remove all
+
+    if no_label_strategy == "Include limited number":
+        # Calculate reasonable default (5-10% of tier1 size)
+        default_limit = min(200, int(tier1_size_target * 0.1))
+
+        max_no_label = st.number_input(
+            "Max no-label passages per tier:",
+            min_value=0,
+            max_value=no_label_count,
+            value=default_limit,
+            step=50,
+            key="smart_preset_no_label_limit",
+            help="Number of unlabeled passages to include in each tier"
+        )
+
+        st.caption(f"💡 Will include up to {max_no_label} unlabeled passages in Tier 1 and Tier 2")
+
+    elif no_label_strategy == "Include all":
+        max_no_label = -1  # special value meaning "don't filter"
+        st.info(f"ℹ️ All {no_label_count} unlabeled passages will be kept")
+
+    # Label targeting option
+    use_targeting = st.checkbox("Enable label targeting for rare labels", value=True)
+
+    label_targets = None
+    if use_targeting:
+        label_targets = render_quick_label_targeting(obj, tier1_size_target, tier2_size_target)
+
+    # Name and create
+    default_name = f"tiered_{obj.name}_{preset_choice.split()[0].lower()}_{datetime.now().strftime('%H%M')}"
+    tiered_name = st.text_input("New object name:", value=default_name, key="smart_preset_name")
+
+    if st.button("🎯 Create Tiers with Smart Preset", type="primary"):
+        tier1_config = {
+            'min_consistency': tier1_cons,
+            'min_rerank': tier1_rerank,
+            'target_size': tier1_size_target
+        }
+
+        tier2_config = {
+            'min_consistency': tier2_cons,
+            'min_rerank': tier2_rerank,
+            'target_size': tier2_size_target
+        }
+
+        create_tiers_and_save(
+            obj,
+            tier1_config,
+            tier2_config,
+            label_targets,
+            tiered_name,
+            max_no_label_passages=max_no_label
+        )
+
+
+def render_manual_thresholds_with_preview(obj: DataObject, recommendations: Dict):
+    """Manual threshold control with real-time preview"""
+
+    st.markdown("#### 🔧 Manual Threshold Control")
+
+    scores_df = obj.scores_cache
+    total_passages = len(obj.df)
+
+    st.caption("Adjust thresholds and see live preview of tier sizes")
+
+    # Use recommendations as defaults
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**Tier 1 (Elite):**")
+
+        tier1_cons = st.slider(
+            "Min consistency:",
+            0.0, 1.0,
+            float(recommendations['tier1_consistency']),
+            0.05,
+            key="manual_tier1_cons"
+        )
+
+        tier1_rerank = st.slider(
+            "Min rerank:",
+            0.0, 1.0,
+            float(recommendations['tier1_rerank']),
+            0.05,
+            key="manual_tier1_rerank"
+        )
+
+        tier1_size = st.number_input(
+            "Target size:",
+            min_value=100,
+            max_value=total_passages,
+            value=int(total_passages * recommendations['target_tier1_pct']),
+            step=100,
+            key="manual_tier1_size"
+        )
+
+    with col2:
+        st.markdown("**Tier 2 (Expansion):**")
+
+        tier2_cons = st.slider(
+            "Min consistency:",
+            0.0, 1.0,
+            float(recommendations['tier2_consistency']),
+            0.05,
+            key="manual_tier2_cons"
+        )
+
+        tier2_rerank = st.slider(
+            "Min rerank:",
+            0.0, 1.0,
+            float(recommendations['tier2_rerank']),
+            0.05,
+            key="manual_tier2_rerank"
+        )
+
+        tier2_size = st.number_input(
+            "Target size:",
+            min_value=100,
+            max_value=total_passages,
+            value=int(total_passages * recommendations['target_tier2_pct']),
+            step=100,
+            key="manual_tier2_size"
         )
 
     st.markdown("---")
 
-    # Tier size targets
-    st.markdown("##### Tier Sizes")
+    # REAL-TIME PREVIEW
+    st.markdown("### 👁️ Live Preview")
+
+    # Calculate how many passages meet each threshold
+    tier1_mask = (
+            (scores_df['consistency_avg'] >= tier1_cons) &
+            (scores_df['rerank_avg'] >= tier1_rerank)
+    )
+
+    tier1_candidates = scores_df[tier1_mask]
+    tier1_actual = min(len(tier1_candidates), tier1_size)
+
+    # For tier 2, exclude tier1
+    remaining_scores = scores_df[~tier1_mask]
+    tier2_mask = (
+            (remaining_scores['consistency_avg'] >= tier2_cons) &
+            (remaining_scores['rerank_avg'] >= tier2_rerank)
+    )
+
+    tier2_candidates = remaining_scores[tier2_mask]
+    tier2_actual = min(len(tier2_candidates), tier2_size)
+
+    inference_actual = total_passages - tier1_actual - tier2_actual
+    training_total = tier1_actual + tier2_actual
+
+    # Show preview
+    preview_col1, preview_col2, preview_col3, preview_col4 = st.columns(4)
+
+    with preview_col1:
+        st.metric("Tier 1", f"{tier1_actual:,}")
+        pct = (tier1_actual / total_passages * 100)
+        st.caption(f"{pct:.1f}% of data")
+        if tier1_actual < tier1_size:
+            st.warning(f"⚠️ Only {tier1_actual} meet criteria")
+
+    with preview_col2:
+        st.metric("Tier 2", f"{tier2_actual:,}")
+        pct = (tier2_actual / total_passages * 100)
+        st.caption(f"{pct:.1f}% of data")
+        if tier2_actual < tier2_size:
+            st.warning(f"⚠️ Only {tier2_actual} meet criteria")
+
+    with preview_col3:
+        st.metric("Training Total", f"{training_total:,}")
+        pct = (training_total / total_passages * 100)
+        st.caption(f"{pct:.1f}% of data")
+        if pct < 35:
+            st.error("❌ Too little training data!")
+        elif pct < 40:
+            st.warning("⚠️ Consider more data")
+        else:
+            st.success("✅ Good amount")
+
+    with preview_col4:
+        st.metric("Inference", f"{inference_actual:,}")
+        pct = (inference_actual / total_passages * 100)
+        st.caption(f"{pct:.1f}% of data")
+        if pct > 65:
+            st.warning("⚠️ Wasting data")
+
+    # Rare label preview
+    with st.expander("🔍 Rare Label Preview", expanded=False):
+        rare_labels = [label for label in obj.label_columns
+                       if (obj.df[label] == 1).sum() / len(obj.df) < 0.10]
+
+        if rare_labels:
+            st.markdown("**Expected rare label counts in each tier:**")
+
+            for label in rare_labels:
+                total_label = (obj.df[label] == 1).sum()
+                expected_tier1 = int(tier1_actual * (total_label / total_passages))
+                expected_tier2 = int(tier2_actual * (total_label / total_passages))
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.caption(f"**{label}**")
+                with col2:
+                    st.caption(f"Tier 1: ~{expected_tier1}")
+                    if expected_tier1 < 30:
+                        st.caption("⚠️ May be too few")
+                with col3:
+                    st.caption(f"Tier 2: ~{expected_tier2}")
+
+    st.markdown("---")
+
+    st.markdown("### 🧹 No-Label Passage Control")
+
+    no_label_count = (obj.df[obj.label_columns].sum(axis=1) == 0).sum()
+    st.info(f"ℹ️ Dataset contains **{no_label_count}** passages with no labels")
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        include_no_labels = st.checkbox(
+            "Include unlabeled passages",
+            value=False,
+            key="manual_include_no_labels",
+            help="Whether to include passages with no active labels"
+        )
+
+    with col2:
+        if include_no_labels:
+            max_no_label = st.number_input(
+                "Max per tier:",
+                min_value=1,
+                max_value=no_label_count,
+                value=min(100, int(tier1_actual * 0.05)),
+                step=10,
+                key="manual_no_label_limit"
+            )
+        else:
+            max_no_label = 0  # Remove all
+
+    if include_no_labels:
+        st.caption(f"Will include up to {max_no_label} unlabeled passages in Tier 1 and Tier 2")
+    else:
+        st.caption("All unlabeled passages will be removed from training tiers")
+
+    # Label targeting
+    use_targeting = st.checkbox("Enable label targeting", value=True, key="manual_targeting")
+
+    label_targets = None
+    if use_targeting:
+        label_targets = render_quick_label_targeting(obj, tier1_actual, tier2_actual)
+
+    # Name and create
+    default_name = f"tiered_{obj.name}_manual_{datetime.now().strftime('%H%M')}"
+    tiered_name = st.text_input("New object name:", value=default_name, key="manual_name")
+
+    if st.button("🎯 Create Tiers with Manual Settings", type="primary"):
+        if training_total < total_passages * 0.30:
+            st.error("❌ Training data too small! Relax thresholds or use more data.")
+            return
+
+        tier1_config = {
+            'min_consistency': tier1_cons,
+            'min_rerank': tier1_rerank,
+            'target_size': tier1_size
+        }
+
+        tier2_config = {
+            'min_consistency': tier2_cons,
+            'min_rerank': tier2_rerank,
+            'target_size': tier2_size
+        }
+
+        create_tiers_and_save(
+            obj,
+            tier1_config,
+            tier2_config,
+            label_targets,
+            tiered_name,
+            max_no_label_passages=max_no_label  # ADD THIS
+        )
+
+
+def render_quick_label_targeting(obj: DataObject, tier1_size: int, tier2_size: int) -> Dict:
+    """Quick label targeting UI"""
+
+    # Find rare labels
+    rare_labels = []
+    for label in obj.label_columns:
+        count = (obj.df[label] == 1).sum()
+        freq = count / len(obj.df)
+        if freq < 0.15:  # Rare if <15%
+            rare_labels.append({'label': label, 'count': count, 'freq': freq})
+
+    if not rare_labels:
+        st.info("No rare labels detected (<15% frequency)")
+        return None
+
+    rare_labels.sort(key=lambda x: x['freq'])  # Rarest first
+
+    st.markdown("**Quick Label Targeting:**")
+    st.caption(f"Setting minimums for {len(rare_labels)} rare labels")
+
+    tier1_targets = {}
+    tier2_targets = {}
+
+    for label_info in rare_labels:
+        label = label_info['label']
+        count = label_info['count']
+        freq = label_info['freq']
+
+        col1, col2, col3 = st.columns([2, 1, 1])
+
+        with col1:
+            st.caption(f"**{label}** ({count} total, {freq * 100:.1f}%)")
+
+        with col2:
+            # Default: aim for 30-50 in tier1 for very rare, or 30% of total
+            default_t1 = min(50, int(count * 0.4), int(tier1_size * 0.08))
+            tier1_targets[label] = st.number_input(
+                "T1",
+                0, count,
+                default_t1,
+                5,
+                key=f"quick_t1_{label}",
+                label_visibility="collapsed"
+            )
+
+        with col3:
+            default_t2 = min(40, int(count * 0.3), int(tier2_size * 0.05))
+            tier2_targets[label] = st.number_input(
+                "T2",
+                0, count,
+                default_t2,
+                5,
+                key=f"quick_t2_{label}",
+                label_visibility="collapsed"
+            )
+
+    return {'tier1': tier1_targets, 'tier2': tier2_targets}
+
+
+def render_skip_quality_tiering(obj: DataObject):
+    """Skip quality-based tiering, use simple stratified split"""
+
+    st.markdown("#### 🎲 Skip Quality Filtering")
+
+    st.warning("""
+    **This will ignore quality scores entirely.**
+
+    Use stratified random sampling to ensure rare labels are represented.
+    Good when quality scores are unreliable or you want maximum data usage.
+    """)
+
+    total = len(obj.df)
 
     col1, col2 = st.columns(2)
 
     with col1:
-        tier1_size = st.number_input(
-            "Tier 1 target size:",
-            min_value=50,
-            max_value=len(obj.df),
-            value=int(len(obj.df) * 0.12),
-            step=50,
-            key="tier1_size"
-        )
-
-        tier1_min_cons = st.slider(
-            "Tier 1 min consistency:",
-            0.0, 1.0, 0.65, 0.05,
-            key="tier1_cons"
-        )
-
-        tier1_min_rerank = st.slider(
-            "Tier 1 min rerank:",
-            0.0, 1.0, 0.45, 0.05,
-            key="tier1_rerank"
-        )
+        tier1_pct = st.slider("Tier 1 %:", 10, 30, 15, 1)
+        tier1_size = int(total * tier1_pct / 100)
+        st.caption(f"~{tier1_size:,} passages")
 
     with col2:
-        tier2_size = st.number_input(
-            "Tier 2 target size:",
-            min_value=50,
-            max_value=len(obj.df),
-            value=int(len(obj.df) * 0.25),
-            step=50,
-            key="tier2_size"
-        )
+        tier2_pct = st.slider("Tier 2 %:", 15, 40, 27, 1)
+        tier2_size = int(total * tier2_pct / 100)
+        st.caption(f"~{tier2_size:,} passages")
 
-        tier2_min_cons = st.slider(
-            "Tier 2 min consistency:",
-            0.0, 1.0, 0.45, 0.05,
-            key="tier2_cons"
-        )
-
-        tier2_min_rerank = st.slider(
-            "Tier 2 min rerank:",
-            0.0, 1.0, 0.30, 0.05,
-            key="tier2_rerank"
-        )
+    training_pct = tier1_pct + tier2_pct
+    st.info(f"**Total training: {training_pct}%** (~{tier1_size + tier2_size:,} passages)")
 
     st.markdown("---")
+    st.markdown("**No-Label Passages**")
 
-    # Label targeting
-    st.markdown("##### 🎯 Label Targeting (Optional)")
+    no_label_count = (obj.df[obj.label_columns].sum(axis=1) == 0).sum()
+    st.caption(f"Dataset contains {no_label_count} passages with no labels")
 
-    st.info("""
-    💡 **Label Targeting** ensures rare or important labels are well-represented in your training tiers.
-
-    Without targeting, tiers are selected purely by quality scores. With targeting, the system will 
-    prioritize including passages with specific labels up to your target counts.
-    """)
-
-    use_targeting = st.checkbox(
-        "Enable label targeting",
+    keep_no_labels = st.checkbox(
+        "Include unlabeled passages",
         value=False,
-        help="Prioritize specific labels to ensure representation"
+        key="random_keep_no_labels"
     )
 
-    label_targets = None
+    if not keep_no_labels and no_label_count > 0:
+        st.info(f"ℹ️ Will remove all {no_label_count} unlabeled passages before splitting")
 
-    if use_targeting:
-        st.markdown("**Set target counts for specific labels:**")
+    # Stratification option
+    rare_labels = [label for label in obj.label_columns
+                   if (obj.df[label] == 1).sum() / len(obj.df) < 0.10]
 
-        # Quick actions
-        col1, col2, col3 = st.columns(3)
+    if rare_labels:
+        stratify_by = st.selectbox(
+            "Stratify by (ensures proportional representation):",
+            ["None"] + rare_labels,
+            index=1 if rare_labels else 0
+        )
+    else:
+        stratify_by = "None"
 
-        with col1:
-            if st.button("🎯 Target All Rare Labels (<10%)", key="target_rare"):
-                st.session_state['label_targeting_mode'] = 'rare'
-                st.rerun()
+    default_name = f"tiered_{obj.name}_random_{datetime.now().strftime('%H%M')}"
+    tiered_name = st.text_input("New object name:", value=default_name, key="random_name")
 
-        with col2:
-            if st.button("🎯 Custom Selection", key="target_custom"):
-                st.session_state['label_targeting_mode'] = 'custom'
-                st.rerun()
+    if st.button("🎲 Create Random Stratified Tiers", type="primary"):
+        from sklearn.model_selection import train_test_split
 
-        with col3:
-            if st.button("🗑️ Clear Targets", key="clear_targets"):
-                st.session_state['label_targeting_mode'] = None
-                st.session_state['tier1_targets'] = {}
-                st.session_state['tier2_targets'] = {}
-                st.rerun()
+        with st.spinner("Creating tiers..."):
+            df = obj.df.copy()
 
-        # Initialize targeting dictionaries
-        if 'tier1_targets' not in st.session_state:
-            st.session_state['tier1_targets'] = {}
-        if 'tier2_targets' not in st.session_state:
-            st.session_state['tier2_targets'] = {}
+            # Filter no-label passages if requested
+            if not keep_no_labels:
+                original_len = len(df)
+                df = df[df[obj.label_columns].sum(axis=1) > 0].copy()
+                removed = original_len - len(df)
+                if removed > 0:
+                    st.info(f"🧹 Removed {removed} passages with no labels")
 
-        # Auto-populate rare labels if mode is 'rare'
-        if st.session_state.get('label_targeting_mode') == 'rare':
-            rare_labels = [stat['label'] for stat in label_stats if stat['is_rare']]
+            # Stratify if specified
+            stratify_col = df[stratify_by] if stratify_by != "None" else None
 
-            for label in rare_labels:
-                count = next(s['count'] for s in label_stats if s['label'] == label)
-                # Target: include most of the rare label passages
-                st.session_state['tier1_targets'][label] = min(count, int(tier1_size * 0.3))
-                st.session_state['tier2_targets'][label] = min(count, int(tier2_size * 0.3))
+            # Split: tier1 vs rest
+            tier1_df, rest_df = train_test_split(
+                df,
+                test_size=(100 - tier1_pct) / 100,
+                stratify=stratify_col,
+                random_state=42
+            )
 
-        # Display targeting UI
-        st.markdown("**Tier 1 Targets:**")
+            # Split rest: tier2 vs inference
+            if stratify_by != "None":
+                stratify_col2 = rest_df[stratify_by]
+            else:
+                stratify_col2 = None
 
-        tier1_cols = st.columns(2)
-        for i, stat in enumerate(label_stats_df.to_dict('records')):
-            with tier1_cols[i % 2]:
-                label = stat['label']
-                count = stat['count']
+            tier2_df, inference_df = train_test_split(
+                rest_df,
+                test_size=(100 - tier1_pct - tier2_pct) / (100 - tier1_pct),
+                stratify=stratify_col2,
+                random_state=42
+            )
 
-                # Show current count
-                current_target = st.session_state['tier1_targets'].get(label, 0)
-
-                new_target = st.number_input(
-                    f"{label} ({count} available)",
-                    min_value=0,
-                    max_value=count,
-                    value=current_target,
-                    step=5,
-                    key=f"tier1_target_{label}",
-                    help=f"{stat['percentage']:.1f}% of dataset"
-                )
-
-                if new_target > 0:
-                    st.session_state['tier1_targets'][label] = new_target
-                elif label in st.session_state['tier1_targets']:
-                    del st.session_state['tier1_targets'][label]
-
-        st.markdown("**Tier 2 Targets:**")
-
-        tier2_cols = st.columns(2)
-        for i, stat in enumerate(label_stats_df.to_dict('records')):
-            with tier2_cols[i % 2]:
-                label = stat['label']
-                count = stat['count']
-
-                current_target = st.session_state['tier2_targets'].get(label, 0)
-
-                new_target = st.number_input(
-                    f"{label} ({count} available)",
-                    min_value=0,
-                    max_value=count,
-                    value=current_target,
-                    step=5,
-                    key=f"tier2_target_{label}",
-                    help=f"{stat['percentage']:.1f}% of dataset"
-                )
-
-                if new_target > 0:
-                    st.session_state['tier2_targets'][label] = new_target
-                elif label in st.session_state['tier2_targets']:
-                    del st.session_state['tier2_targets'][label]
-
-        # Build label_targets dict
-        if st.session_state['tier1_targets'] or st.session_state['tier2_targets']:
-            label_targets = {}
-            if st.session_state['tier1_targets']:
-                label_targets['tier1'] = st.session_state['tier1_targets']
-            if st.session_state['tier2_targets']:
-                label_targets['tier2'] = st.session_state['tier2_targets']
-
-            # Show summary
-            with st.expander("📋 Targeting Summary", expanded=True):
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.markdown("**Tier 1 Targets:**")
-                    if st.session_state['tier1_targets']:
-                        for label, count in st.session_state['tier1_targets'].items():
-                            st.caption(f"• {label}: {count}")
-                    else:
-                        st.caption("No targets set")
-
-                with col2:
-                    st.markdown("**Tier 2 Targets:**")
-                    if st.session_state['tier2_targets']:
-                        for label, count in st.session_state['tier2_targets'].items():
-                            st.caption(f"• {label}: {count}")
-                    else:
-                        st.caption("No targets set")
-
-    st.markdown("---")
-
-    # Name and create
-    default_name = f"tiered_{obj.name}_{datetime.now().strftime('%H%M')}"
-    if use_targeting and label_targets:
-        default_name += "_targeted"
-
-    tiered_name = st.text_input("New object name:", value=default_name, key="tier_name_advanced")
-
-    if st.button("🎯 Create Tiers with Configuration", type="primary"):
-        with st.spinner("Creating tiers with custom configuration..."):
-            segmenter = DataSegmenter(obj.df, obj.scores_cache, obj.label_columns)
-
-            tier1_config = {
-                'min_consistency': tier1_min_cons,
-                'min_rerank': tier1_min_rerank,
-                'target_size': tier1_size
+            # Create metadata
+            metadata = {
+                'method': 'random_stratified',
+                'stratified_by': stratify_by,
+                'tiers': {
+                    'tier1': {'count': len(tier1_df), 'percentage': tier1_pct},
+                    'tier2': {'count': len(tier2_df), 'percentage': tier2_pct},
+                    'inference': {'count': len(inference_df), 'percentage': 100 - training_pct}
+                }
             }
 
-            tier2_config = {
-                'min_consistency': tier2_min_cons,
-                'min_rerank': tier2_min_rerank,
-                'target_size': tier2_size
-            }
+            save_tiered_object(obj, tiered_name, tier1_df, tier2_df, inference_df, metadata)
 
+
+def create_tiers_and_save(
+        obj: DataObject,
+        tier1_config: Dict,
+        tier2_config: Dict,
+        label_targets: Optional[Dict],
+        tiered_name: str,
+        max_no_label_passages: int = 0  # NEW PARAMETER
+):
+    """Helper to create tiers with validation and retry options"""
+
+    with st.spinner("Creating tiers..."):
+        segmenter = DataSegmenter(obj.df, obj.scores_cache, obj.label_columns)
+
+        # Use enhanced method if targeting enabled
+        if label_targets:
+            tier1, tier2, inference, metadata = segmenter.create_stratified_quality_tiers(
+                tier1_config,
+                tier2_config,
+                label_targets=label_targets,
+                max_no_label_passages=max_no_label_passages  # ADD THIS
+            )
+        else:
             tier1, tier2, inference, metadata = segmenter.create_quality_tiers(
                 tier1_config,
                 tier2_config,
-                label_targets=label_targets  # ✅ NOW PASSING LABEL TARGETS
+                label_targets=None,
+                max_no_label_passages=max_no_label_passages  # ADD THIS
             )
 
-            save_tiered_object(obj, tiered_name, tier1, tier2, inference, metadata)
+        # Validate before saving
+        is_valid, error_msg = validate_tier_sizes_before_creation(
+            len(tier1), len(tier2), len(obj.df)
+        )
+
+        if not is_valid:
+            st.error("❌ Tier configuration rejected:")
+            st.error(error_msg)
+
+            # Show the problematic distribution
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Tier 1", len(tier1),
+                          delta=f"{len(tier1) - 600}",
+                          delta_color="off" if len(tier1) < 600 else "normal")
+            with col2:
+                training_pct = (len(tier1) + len(tier2)) / len(obj.df) * 100
+                st.metric("Training %", f"{training_pct:.1f}%",
+                          delta=f"{training_pct - 35:.1f}%",
+                          delta_color="off" if training_pct < 35 else "normal")
+            with col3:
+                wasted_pct = len(inference) / len(obj.df) * 100
+                st.metric("Wasted %", f"{wasted_pct:.1f}%",
+                          delta=f"{wasted_pct - 65:.1f}%",
+                          delta_color="inverse")
+
+            st.warning("⚠️ Tiers NOT created. Choose a solution below:")
+
+            # ✅ PROVIDE IMMEDIATE SOLUTIONS
+            st.markdown("---")
+            st.markdown("### 🔧 Quick Fix Options")
+
+            solution = st.radio(
+                "How to fix this:",
+                [
+                    "🎲 Skip Quality Filtering (Use Random Stratified Split)",
+                    "⚙️ Use Relaxed Thresholds (Auto-calculated)",
+                    "✏️ Manually Adjust Settings Above"
+                ],
+                key="tier_fix_solution"
+            )
+
+            if solution.startswith("🎲"):
+                st.info("""
+                **Recommended:** Skip quality filtering entirely and use stratified random sampling.
+
+                This will:
+                - Use 18% for Tier 1 (~1,200 passages)
+                - Use 30% for Tier 2 (~2,000 passages)  
+                - Stratify by Material_Physical to ensure representation
+                - Total: 48% for training
+                """)
+
+                if st.button("✅ Create Random Stratified Tiers", type="primary", key="quick_random_tiers"):
+                    create_random_stratified_tiers_immediately(obj, tiered_name)
+
+            elif solution.startswith("⚙️"):
+                # Calculate what thresholds would give us 18% + 30%
+                scores_df = obj.scores_cache
+
+                # Target: top 18% for tier 1
+                tier1_percentile = 82  # 100 - 18
+                tier1_cons_relaxed = scores_df['consistency_avg'].quantile(tier1_percentile / 100)
+                tier1_rerank_relaxed = scores_df['rerank_avg'].quantile(tier1_percentile / 100)
+
+                # Target: top 48% total (18% + 30%)
+                tier2_percentile = 52  # 100 - 48
+                tier2_cons_relaxed = scores_df['consistency_avg'].quantile(tier2_percentile / 100)
+                tier2_rerank_relaxed = scores_df['rerank_avg'].quantile(tier2_percentile / 100)
+
+                # Cap at reasonable minimums
+                tier1_cons_relaxed = max(0.40, min(tier1_cons_relaxed, 0.65))
+                tier1_rerank_relaxed = max(0.25, min(tier1_rerank_relaxed, 0.50))
+                tier2_cons_relaxed = max(0.25, min(tier2_cons_relaxed, 0.50))
+                tier2_rerank_relaxed = max(0.15, min(tier2_rerank_relaxed, 0.35))
+
+                target_tier1_size = int(len(obj.df) * 0.18)
+                target_tier2_size = int(len(obj.df) * 0.30)
+
+                st.info(f"""
+                **Auto-calculated relaxed thresholds:**
+
+                Tier 1 (~{target_tier1_size} passages):
+                - Consistency ≥ {tier1_cons_relaxed:.3f}
+                - Rerank ≥ {tier1_rerank_relaxed:.3f}
+
+                Tier 2 (~{target_tier2_size} passages):
+                - Consistency ≥ {tier2_cons_relaxed:.3f}
+                - Rerank ≥ {tier2_rerank_relaxed:.3f}
+
+                These are the 82nd and 52nd percentiles of your data.
+                """)
+
+                if st.button("✅ Create Tiers with Relaxed Thresholds", type="primary", key="quick_relaxed_tiers"):
+                    relaxed_tier1_config = {
+                        'min_consistency': tier1_cons_relaxed,
+                        'min_rerank': tier1_rerank_relaxed,
+                        'target_size': target_tier1_size
+                    }
+
+                    relaxed_tier2_config = {
+                        'min_consistency': tier2_cons_relaxed,
+                        'min_rerank': tier2_rerank_relaxed,
+                        'target_size': target_tier2_size
+                    }
+
+                    # Recursively call with relaxed settings
+                    create_tiers_and_save(
+                        obj,
+                        relaxed_tier1_config,
+                        relaxed_tier2_config,
+                        label_targets,  # Keep same label targets
+                        f"{tiered_name}_relaxed"
+                    )
+
+            else:  # Manual adjustment
+                st.info(
+                    "👆 Scroll up and adjust the thresholds in the configuration section above, then click Create again.")
+
+            return  # Don't save
+
+        # If valid, save
+        save_tiered_object(obj, tiered_name, tier1, tier2, inference, metadata)
+
+
+def create_random_stratified_tiers_immediately(obj: DataObject, base_name: str):
+    """Immediately create random stratified tiers without quality filtering"""
+
+    from sklearn.model_selection import train_test_split
+
+    with st.spinner("Creating random stratified tiers..."):
+        df = obj.df.copy()
+
+        # Use Material_Physical for stratification (most problematic rare label)
+        rare_labels = [label for label in obj.label_columns
+                       if (df[label] == 1).sum() / len(df) < 0.10]
+
+        if 'Material_Physical' in rare_labels:
+            stratify_col = df['Material_Physical']
+            stratify_name = 'Material_Physical'
+        elif rare_labels:
+            stratify_col = df[rare_labels[0]]
+            stratify_name = rare_labels[0]
+        else:
+            stratify_col = None
+            stratify_name = 'None'
+
+        # Split: 18% tier1, 30% tier2, 52% inference
+        tier1_df, rest_df = train_test_split(
+            df,
+            test_size=0.82,  # Keep 82%
+            stratify=stratify_col,
+            random_state=42
+        )
+
+        # Split rest: 30% of original = 36.6% of remaining
+        if stratify_name != 'None':
+            stratify_col2 = rest_df[stratify_name]
+        else:
+            stratify_col2 = None
+
+        tier2_df, inference_df = train_test_split(
+            rest_df,
+            test_size=0.634,  # 52/82 = 0.634
+            stratify=stratify_col2,
+            random_state=42
+        )
+
+        # Validate
+        is_valid, error_msg = validate_tier_sizes_before_creation(
+            len(tier1_df), len(tier2_df), len(df)
+        )
+
+        if not is_valid:
+            st.error("❌ Even random stratified split failed! This shouldn't happen.")
+            st.error(error_msg)
+            return
+
+        # Create metadata
+        metadata = {
+            'method': 'random_stratified',
+            'stratified_by': stratify_name,
+            'note': 'Quality scores ignored - random stratified split',
+            'tiers': {
+                'tier1': {'count': len(tier1_df), 'percentage': 18},
+                'tier2': {'count': len(tier2_df), 'percentage': 30},
+                'inference': {'count': len(inference_df), 'percentage': 52}
+            }
+        }
+
+        save_tiered_object(obj, f"{base_name}_random", tier1_df, tier2_df, inference_df, metadata)
 
 
 def save_tiered_object(obj, tiered_name, tier1, tier2, inference, metadata):
-    """Helper to save tiered object"""
+    """Helper to save tiered object with verification display"""
 
     pipeline = st.session_state.pipeline
     tiered_obj = pipeline.create_tiered(
@@ -1454,8 +2135,6 @@ def save_tiered_object(obj, tiered_name, tier1, tier2, inference, metadata):
     )
 
     st.session_state['current_data_object'] = tiered_obj
-
-    # Show success with details
     st.success(f"✅ Created TIERED object: {tiered_name}")
 
     col1, col2, col3 = st.columns(3)
@@ -1466,20 +2145,40 @@ def save_tiered_object(obj, tiered_name, tier1, tier2, inference, metadata):
     with col3:
         st.metric("Inference", len(inference))
 
-    # Show label distribution if targeting was used
-    if metadata.get('tiers', {}).get('tier1', {}).get('label_distribution'):
-        with st.expander("📊 Achieved Label Distribution"):
-            tier1_dist = metadata['tiers']['tier1']['label_distribution']
+    # ✅ SHOW VERIFICATION IF TARGETING WAS USED
+    if metadata.get('label_targeting', {}).get('enabled'):
+        st.markdown("---")
+        st.markdown("### 🎯 Label Targeting Verification")
 
-            st.markdown("**Tier 1 Label Counts:**")
-            for label, info in tier1_dist.items():
-                if info['count'] > 0:
-                    st.caption(f"• {label}: {info['count']} ({info['percentage']:.1f}%)")
+        verification = metadata['label_targeting']['verification']
+
+        for tier_name, tier_verification in verification.items():
+            st.markdown(f"**{tier_name.upper()}:**")
+
+            for label, info in tier_verification.items():
+                target = info['target']
+                actual = info['actual']
+                met = info['met']
+
+                col1, col2, col3, col4 = st.columns(4)
+
+                with col1:
+                    st.caption(f"**{label}**")
+
+                with col2:
+                    status = "✅" if met else "⚠️"
+                    st.caption(f"{status} {actual}/{target}")
+
+                with col3:
+                    st.caption(f"{info['percentage']:.1f}% of tier")
+
+                with col4:
+                    st.caption(f"Global: {info['global_frequency']:.1f}%")
+
+            st.markdown("")
 
     st.balloons()
     st.rerun()
-
-
 
 
 def render_tiered_actions(obj: DataObject):
@@ -1487,6 +2186,30 @@ def render_tiered_actions(obj: DataObject):
 
     st.markdown("### ✅ Ready for Training")
 
+    # ✅ ADD: Go back to parent
+    if obj.parent:
+
+        col1, col2 = st.columns([1, 3])
+
+        with col1:
+            if st.button("⬅️ Go Back to SCORED", type="secondary"):
+                # Load parent object
+                pipeline = st.session_state.pipeline
+                parent_obj = pipeline.manager.load(obj.parent['name'], obj.parent['stage'])
+
+                if parent_obj:
+                    st.session_state['current_data_object'] = parent_obj
+                    st.success(f"✅ Loaded parent: {obj.parent['name']}")
+                    st.rerun()
+                else:
+                    st.error("❌ Could not load parent")
+
+        with col2:
+            st.caption("Delete this tiered object and try different settings")
+
+        st.markdown("---")
+
+    # Show current tiers
     st.success("Your tiered datasets are ready!")
 
     # Show tier sizes
@@ -1510,6 +2233,50 @@ def render_tiered_actions(obj: DataObject):
 
     st.info("💡 Data is loaded. Use sidebar navigation to go to **🤖 Models** page")
 
+
+def validate_tier_sizes_before_creation(
+        tier1_actual: int,
+        tier2_actual: int,
+        total: int,
+        min_tier1: int = 600,
+        min_training_pct: float = 0.35
+) -> Tuple[bool, str]:
+    """
+    Validate tier sizes are reasonable before creating
+
+    Returns: (is_valid, error_message)
+    """
+
+    training_total = tier1_actual + tier2_actual
+    training_pct = training_total / total
+
+    errors = []
+
+    if tier1_actual < min_tier1:
+        errors.append(f"❌ Tier 1 too small: {tier1_actual} < {min_tier1} minimum")
+
+    if training_pct < min_training_pct:
+        errors.append(f"❌ Training data too small: {training_pct * 100:.1f}% < {min_training_pct * 100:.0f}% minimum")
+
+    if tier1_actual + tier2_actual < 1500:
+        errors.append(f"❌ Total training too small: {tier1_actual + tier2_actual} < 1500 minimum")
+
+    if errors:
+        error_msg = "\n".join(errors)
+        error_msg += f"\n\n**Current distribution:**\n"
+        error_msg += f"- Tier 1: {tier1_actual} ({tier1_actual / total * 100:.1f}%)\n"
+        error_msg += f"- Tier 2: {tier2_actual} ({tier2_actual / total * 100:.1f}%)\n"
+        error_msg += f"- Training Total: {training_total} ({training_pct * 100:.1f}%)\n"
+        error_msg += f"- Inference: {total - training_total} ({(total - training_total) / total * 100:.1f}%)\n\n"
+        error_msg += "**Solutions:**\n"
+        error_msg += "1. ⬇️ Lower quality thresholds (most common fix)\n"
+        error_msg += "2. 🎲 Use 'Skip Quality Filtering' for random stratified split\n"
+        error_msg += "3. ⚙️ Increase target tier sizes\n"
+
+        return False, error_msg
+
+    return True, ""
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
@@ -1524,8 +2291,8 @@ def generate_embeddings(obj: DataObject, batch_size: int, embedded_name: str):
 
     with st.spinner("Generating embeddings..."):
         try:
-            # Embed with checkpointing
-            passage_id_map = finder.embed_and_store_passages(
+            # Returns {stable_id: pinecone_id} now
+            stable_id_to_pinecone = finder.embed_and_store_passages(
                 df=obj.df,
                 passage_column=obj.passage_col,
                 label_columns=obj.label_columns,
@@ -1533,16 +2300,16 @@ def generate_embeddings(obj: DataObject, batch_size: int, embedded_name: str):
                 batch_size=batch_size
             )
 
-            # Save to cache
+            # Save to cache (now maps stable_id -> pinecone_id)
             cache_manager = st.session_state.cache_manager
-            cache_manager.save_embeddings(obj.namespace, passage_id_map)
+            cache_manager.save_embeddings(obj.namespace, stable_id_to_pinecone)
 
             # Create EMBEDDED object
             pipeline = st.session_state.pipeline
             embedded_obj = pipeline.create_embedded(
                 name=embedded_name,
                 parent_obj=obj,
-                embeddings_cache=passage_id_map
+                embeddings_cache=stable_id_to_pinecone  # Changed mapping
             )
 
             st.session_state['current_data_object'] = embedded_obj
@@ -1558,107 +2325,215 @@ def generate_embeddings(obj: DataObject, batch_size: int, embedded_name: str):
 
 
 def calculate_scores(obj: DataObject, k_similar: int, scored_name: str):
-    """Calculate quality scores with checkpointing"""
+    """Calculate quality scores with proper reranking and class imbalance handling"""
 
     finder = st.session_state.get('finder')
     if finder is None:
         st.error("❌ Finder not initialized")
         return
 
-    with st.spinner("Calculating scores..."):
+    if 'passage_id' not in obj.df.columns:
+        st.error("❌ DataFrame missing stable passage_id column")
+        return
+
+    # Calculate label frequencies for weighting
+    label_frequencies = {
+        label: obj.df[label].mean()
+        for label in obj.label_columns
+    }
+
+    st.info(f"""
+    **Label Frequencies:**
+    - Very Rare (<5%): {sum(1 for f in label_frequencies.values() if f < 0.05)} labels
+    - Rare (5-15%): {sum(1 for f in label_frequencies.values() if 0.05 <= f < 0.15)} labels  
+    - Common (>15%): {sum(1 for f in label_frequencies.values() if f >= 0.15)} labels
+    """)
+
+    with st.spinner("Step 1/3: Calculating consistency scores..."):
         try:
-            # Get valid indices
-            valid_df_indices = set(obj.df.index.tolist())
-            embedded_indices = [
-                idx for idx in obj.embeddings_cache.keys()
-                if idx in valid_df_indices
-            ]
-
-            if not embedded_indices:
-                st.error("❌ No valid embeddings found")
-                return
-
             consistency_scores = {}
+            consistency_by_label = {}  # Track per-label scores
+
             progress = st.progress(0)
             status = st.empty()
 
-            for i, df_idx in enumerate(embedded_indices):
+            valid_rows = obj.df[obj.df['passage_id'].notna()]
+
+            for i, (df_idx, row) in enumerate(valid_rows.iterrows()):
+                stable_id = row['passage_id']
+
                 try:
-                    # Pass DataFrame index directly - finder builds Pinecone ID internally
-                    similar = finder.find_similar_passages(
-                        query_idx=df_idx,  # ✅ Just the integer index
+                    # Find similar passages using stable ID
+                    similar = finder.search_similar_to_passage(
+                        passage_idx=df_idx,
+                        namespace=obj.namespace,
                         k=k_similar,
-                        namespace=obj.namespace
+                        exclude_self=True,
+                        df=obj.df
                     )
 
-                    # Filter similar passages to only those in current df
-                    similar_filtered = [
-                        s for s in similar
-                        if s['passage_idx'] in valid_df_indices
-                    ]
-
-                    if not similar_filtered:
+                    if not similar:
                         consistency_scores[df_idx] = 0.0
+                        consistency_by_label[df_idx] = {l: 0.0 for l in obj.label_columns}
                         continue
 
-                    # Calculate consistency - also pass DataFrame index
+                    # Calculate consistency with improved method
                     consistency = finder.calculate_label_consistency(
-                        query_idx=df_idx,  # ✅ Just the integer index
-                        similar_passages=similar_filtered,
+                        query_idx=df_idx,
+                        similar_passages=similar,
                         label_columns=obj.label_columns,
-                        namespace=obj.namespace
+                        df=obj.df,
+                        namespace=obj.namespace,
+                        label_frequencies=label_frequencies
                     )
 
-                    passage_labels = [l for l in obj.label_columns if obj.df.loc[df_idx, l] == 1]
+                    # Store per-label scores
+                    consistency_by_label[df_idx] = consistency
 
-                    if passage_labels:
-                        avg = sum(consistency[l] for l in passage_labels) / len(passage_labels)
+                    # Average across ACTIVE labels only
+                    active_labels = [l for l in obj.label_columns if obj.df.loc[df_idx, l] == 1]
+
+                    if active_labels:
+                        # Weight by inverse frequency for averaging
+                        weighted_scores = []
+                        for label in active_labels:
+                            freq = label_frequencies[label]
+                            # Rare labels get higher weight
+                            weight = 1.0 / (freq + 0.01)  # +0.01 to avoid division by zero
+                            weighted_scores.append(consistency[label] * weight)
+
+                        avg = sum(weighted_scores) / sum(1.0 / (label_frequencies[l] + 0.01) for l in active_labels)
                     else:
                         avg = 0.0
 
                     consistency_scores[df_idx] = avg
 
                 except Exception as e:
-                    st.warning(f"⚠️ Error processing passage {df_idx}: {e}")
+                    st.warning(f"⚠️ Error processing {stable_id[:8]}: {e}")
                     consistency_scores[df_idx] = 0.0
+                    consistency_by_label[df_idx] = {l: 0.0 for l in obj.label_columns}
 
                 # Update progress
-                pct = (i + 1) / len(embedded_indices)
+                pct = (i + 1) / len(valid_rows)
                 progress.progress(pct)
-                status.text(f"Processing: {i + 1}/{len(embedded_indices)}")
+                status.text(f"Consistency: {i + 1}/{len(valid_rows)}")
 
             progress.empty()
             status.empty()
 
-            # Create scores DataFrame
-            scores_df = pd.DataFrame([
-                {
-                    'passage_idx': idx,
-                    'consistency_avg': consistency_scores[idx],
-                    'rerank_avg': consistency_scores[idx]
-                }
-                for idx in embedded_indices
-            ])
-
-            # Save to cache
-            cache_manager = st.session_state.cache_manager
-            cache_manager.save_scores(obj.namespace, scores_df)
-
-            # Create SCORED object
-            pipeline = st.session_state.pipeline
-            scored_obj = pipeline.create_scored(
-                name=scored_name,
-                parent_obj=obj,
-                scores_df=scores_df
-            )
-
-            st.session_state['current_data_object'] = scored_obj
-            st.success(f"✅ Created SCORED object: {scored_name}")
-            st.balloons()
-            st.rerun()
+            st.success(f"✅ Calculated consistency for {len(consistency_scores)} passages")
 
         except Exception as e:
-            st.error(f"❌ Error: {e}")
+            st.error(f"❌ Consistency calculation failed: {e}")
             import traceback
             with st.expander("Error details"):
                 st.code(traceback.format_exc())
+            return
+
+    # Step 2: Calculate rerank scores
+    with st.spinner("Step 2/3: Calculating semantic relevance scores..."):
+        try:
+            # Prepare passages for reranking
+            passages_to_rerank = [
+                (idx, str(obj.df.loc[idx, obj.passage_col]))
+                for idx in valid_rows.index
+                if obj.df.loc[idx, obj.passage_col] is not None
+            ]
+
+            # ✅ FIX: Use correct method name
+            rerank_scores = finder.calculate_rerank_scores(  # Changed from calculate_rerank_scores_batch
+                passages=passages_to_rerank,
+                label_columns=obj.label_columns,
+                df=obj.df,
+                batch_size=32
+            )
+
+            st.success(f"✅ Reranked {len(rerank_scores)} passages")
+
+        except Exception as e:
+            st.error(f"❌ Reranking failed: {e}")
+            import traceback
+            with st.expander("Error details"):
+                st.code(traceback.format_exc())
+            return
+
+    # Step 3: Combine scores and create DataFrame
+    with st.spinner("Step 3/3: Creating scores dataframe..."):
+        scores_data = []
+
+        for df_idx in obj.df.index:
+            if df_idx not in consistency_scores:
+                continue
+
+            # Get per-label scores
+            cons_by_label = consistency_by_label.get(df_idx, {})
+            rerank_by_label = rerank_scores.get(df_idx, {})
+
+            # Calculate weighted averages for active labels
+            active_labels = [l for l in obj.label_columns if obj.df.loc[df_idx, l] == 1]
+
+            if active_labels:
+                # Consistency avg (frequency-weighted)
+                cons_weighted = []
+                for label in active_labels:
+                    freq = label_frequencies[label]
+                    weight = 1.0 / (freq + 0.01)
+                    cons_weighted.append(cons_by_label.get(label, 0.0) * weight)
+
+                cons_avg = sum(cons_weighted) / sum(1.0 / (label_frequencies[l] + 0.01) for l in active_labels)
+
+                # Rerank avg (frequency-weighted)
+                rerank_weighted = []
+                for label in active_labels:
+                    freq = label_frequencies[label]
+                    weight = 1.0 / (freq + 0.01)
+                    rerank_weighted.append(rerank_by_label.get(label, 0.0) * weight)
+
+                rerank_avg = sum(rerank_weighted) / sum(1.0 / (label_frequencies[l] + 0.01) for l in active_labels)
+            else:
+                cons_avg = 0.0
+                rerank_avg = 0.0
+
+            scores_data.append({
+                'passage_idx': df_idx,
+                'stable_id': obj.df.loc[df_idx, 'passage_id'],
+                'consistency_avg': cons_avg,
+                'rerank_avg': rerank_avg,
+                'composite': 0.5 * cons_avg + 0.5 * rerank_avg,
+                **{f'consistency_{l}': cons_by_label.get(l, 0.0) for l in obj.label_columns},
+                **{f'rerank_{l}': rerank_by_label.get(l, 0.0) for l in obj.label_columns}
+            })
+
+        scores_df = pd.DataFrame(scores_data)
+
+        # Show distribution
+        st.markdown("**Score Distribution:**")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric("Consistency", f"{scores_df['consistency_avg'].mean():.3f}")
+            st.caption(f"Median: {scores_df['consistency_avg'].median():.3f}")
+
+        with col2:
+            st.metric("Rerank", f"{scores_df['rerank_avg'].mean():.3f}")
+            st.caption(f"Median: {scores_df['rerank_avg'].median():.3f}")
+
+        with col3:
+            st.metric("Composite", f"{scores_df['composite'].mean():.3f}")
+            st.caption(f"Median: {scores_df['composite'].median():.3f}")
+
+        # Save and continue
+        cache_manager = st.session_state.cache_manager
+        cache_manager.save_scores(obj.namespace, scores_df)
+
+        pipeline = st.session_state.pipeline
+        scored_obj = pipeline.create_scored(
+            name=scored_name,
+            parent_obj=obj,
+            scores_df=scores_df
+        )
+
+        st.session_state['current_data_object'] = scored_obj
+        st.success(f"✅ Created SCORED object: {scored_name}")
+        st.balloons()
+        st.rerun()

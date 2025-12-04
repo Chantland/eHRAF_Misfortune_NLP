@@ -121,13 +121,13 @@ class ConfigurableHierarchicalModel(PreTrainedModel):
         return nn.Sequential(*layers)
 
     def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        labels=None,
-        teacher_forcing=False,
-        return_dict=None,
-        **kwargs
+            self,
+            input_ids=None,
+            attention_mask=None,
+            labels=None,
+            teacher_forcing=False,
+            return_dict=None,
+            **kwargs
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         encoder_outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
@@ -143,20 +143,46 @@ class ConfigurableHierarchicalModel(PreTrainedModel):
         else:
             hierarchical_input = pooled_output
 
-        event_logits = self.event_classifier(hierarchical_input) if self.event_classifier else torch.zeros(main_logits.shape[0], 0).to(main_logits.device)
-        cause_logits = self.cause_classifier(hierarchical_input) if self.cause_classifier else torch.zeros(main_logits.shape[0], 0).to(main_logits.device)
-        action_logits = self.action_classifier(hierarchical_input) if self.action_classifier else torch.zeros(main_logits.shape[0], 0).to(main_logits.device)
+        event_logits = self.event_classifier(hierarchical_input) if self.event_classifier else torch.zeros(
+            main_logits.shape[0], 0).to(main_logits.device)
+        cause_logits = self.cause_classifier(hierarchical_input) if self.cause_classifier else torch.zeros(
+            main_logits.shape[0], 0).to(main_logits.device)
+        action_logits = self.action_classifier(hierarchical_input) if self.action_classifier else torch.zeros(
+            main_logits.shape[0], 0).to(main_logits.device)
 
-        if self.gated_hierarchy and self.use_hierarchy:
+        # ✅ FIX: Only gate if we have main labels AND sublabels
+        if self.gated_hierarchy and self.use_hierarchy and self.config.num_main_labels > 0:
             main_probs = torch.sigmoid(main_logits)
-            if event_logits.shape[1] > 0:
-                event_gate = torch.where(main_probs[:, 0:1] > self.gate_threshold, torch.ones_like(main_probs[:, 0:1]), torch.zeros_like(main_probs[:, 0:1]))
+
+            # Gate EVENT sublabels (only if we have both main and sublabels)
+            if event_logits.shape[1] > 0 and main_probs.shape[1] > 0:
+                event_gate = torch.where(
+                    main_probs[:, 0:1] > self.gate_threshold,
+                    torch.ones_like(main_probs[:, 0:1]),
+                    torch.zeros_like(main_probs[:, 0:1])
+                )
+                # Broadcast gate to match sublabel dimensions
+                event_gate = event_gate.expand(-1, event_logits.shape[1])
                 event_logits = event_logits * event_gate
-            if cause_logits.shape[1] > 0:
-                cause_gate = torch.where(main_probs[:, 1:2] > self.gate_threshold, torch.ones_like(main_probs[:, 1:2]), torch.zeros_like(main_probs[:, 1:2]))
+
+            # Gate CAUSE sublabels
+            if cause_logits.shape[1] > 0 and main_probs.shape[1] > 1:
+                cause_gate = torch.where(
+                    main_probs[:, 1:2] > self.gate_threshold,
+                    torch.ones_like(main_probs[:, 1:2]),
+                    torch.zeros_like(main_probs[:, 1:2])
+                )
+                cause_gate = cause_gate.expand(-1, cause_logits.shape[1])
                 cause_logits = cause_logits * cause_gate
-            if action_logits.shape[1] > 0:
-                action_gate = torch.where(main_probs[:, 2:3] > self.gate_threshold, torch.ones_like(main_probs[:, 2:3]), torch.zeros_like(main_probs[:, 2:3]))
+
+            # Gate ACTION sublabels
+            if action_logits.shape[1] > 0 and main_probs.shape[1] > 2:
+                action_gate = torch.where(
+                    main_probs[:, 2:3] > self.gate_threshold,
+                    torch.ones_like(main_probs[:, 2:3]),
+                    torch.zeros_like(main_probs[:, 2:3])
+                )
+                action_gate = action_gate.expand(-1, action_logits.shape[1])
                 action_logits = action_logits * action_gate
 
         logits = torch.cat([main_logits, event_logits, cause_logits, action_logits], dim=1)

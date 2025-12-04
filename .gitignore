@@ -14,24 +14,20 @@ Lilja_Ngrams
 /NLP Predictions Analysis
 MY_TOOLS
 .idea
-CONFIGURABLE_MODEL/results
 .env
-<<<<<<< HEAD
-<<<<<<< HEAD
+
 venv
 
 __pycache__
-=======
-=======
->>>>>>> a4941b3cc528ded2e6ea962b47b91ec2266b31e1
+
 .venv
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-<<<<<<< HEAD
->>>>>>> a4941b3cc528ded2e6ea962b47b91ec2266b31e1
-=======
->>>>>>> a4941b3cc528ded2e6ea962b47b91ec2266b31e1
+temp
 
+GOLDEN_DATASET/ATT91541.env
+/HRAF_NLP/HRAF_MultiLabel_SubClasses_Kfolds/Model_9_JohnRoberta
+*.safetensors

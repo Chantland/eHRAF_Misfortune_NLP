@@ -49,7 +49,7 @@ class DataObject:
     namespace: str = None
 
     # Caches (loaded from disk if available)
-    embeddings_cache: Optional[Dict] = None  # passage_id_map
+    embeddings_cache: Optional[Dict] = None  # stable_id -> pinecone_id mapping
     scores_cache: Optional[pd.DataFrame] = None  # quality scores
 
     # Metadata
@@ -67,7 +67,7 @@ class DataObject:
 
     @property
     def has_embeddings(self) -> bool:
-        """Check if embeddings are available"""
+        """Check if embeddings are available (stable_id -> pinecone_id mapping)"""
         return self.embeddings_cache is not None and len(self.embeddings_cache) > 0
 
     @property
@@ -102,27 +102,136 @@ class DataObject:
             'has_embeddings': self.has_embeddings,
             'has_scores': self.has_scores,
             'num_passages': len(self.df),
-            'metadata': self.metadata
+            'metadata': self.metadata,
+            'embedding_format': 'stable_id_to_pinecone'  # ADD THIS
         }
 
 
 class DataObjectManager:
     """
     Manages saving/loading of DataObjects
-
-    Integrates:
-    - CacheManager for embeddings/scores
-    - DataExperiment for directory structure
-    - File I/O for data and metadata
+    Now supports fallback _data directory
     """
 
     def __init__(self, base_dir: str = "./data/objects"):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
+        # Setup fallback directory
+        self.fallback_dir = Path(base_dir.replace("data", "_data"))
+
         # Import here to avoid circular dependency
         from core.data_cache import CacheManager
         self.cache_manager = CacheManager()
+
+    def load(self, name: str, stage: PipelineStage) -> Optional[DataObject]:
+        """
+        Load DataObject from disk (checks both primary and fallback)
+
+        Args:
+            name: Object name
+            stage: Pipeline stage
+
+        Returns:
+            DataObject or None if not found
+        """
+        # Try primary location first
+        obj_dir = self.base_dir / stage.value / name
+
+        # Fall back to _data if not found
+        if not obj_dir.exists() and self.fallback_dir.exists():
+            obj_dir = self.fallback_dir / stage.value / name
+
+        if not obj_dir.exists():
+            return None
+
+        # [rest of load() method remains the same]
+        meta_path = obj_dir / "metadata.json"
+        if not meta_path.exists():
+            return None
+
+        with open(meta_path, 'r') as f:
+            metadata = json.load(f)
+
+        df_path = obj_dir / "data.xlsx"
+        if not df_path.exists():
+            return None
+
+        df = pd.read_excel(df_path)
+
+        namespace = metadata.get('namespace')
+        embeddings = self.cache_manager.load_embeddings(namespace)
+        scores = self.cache_manager.load_scores(namespace)
+
+        return DataObject(
+            name=metadata['name'],
+            stage=PipelineStage(metadata['stage']),
+            df=df,
+            passage_col=metadata['passage_col'],
+            label_columns=metadata['label_columns'],
+            metadata_columns=metadata.get('metadata_columns', []),
+            parent=metadata.get('parent'),
+            created_at=metadata.get('created_at'),
+            namespace=namespace,
+            embeddings_cache=embeddings,
+            scores_cache=scores,
+            metadata=metadata.get('metadata', {})
+        )
+
+    def list_objects(self, stage: Optional[PipelineStage] = None) -> List[Dict]:
+        """
+        List all saved DataObjects (from both primary and fallback)
+
+        Args:
+            stage: Optional filter by stage
+
+        Returns:
+            List of object summaries
+        """
+        objects = []
+
+        if stage:
+            stages = [stage]
+        else:
+            stages = list(PipelineStage)
+
+        # Search both primary and fallback directories
+        search_dirs = [self.base_dir]
+        if self.fallback_dir.exists():
+            search_dirs.append(self.fallback_dir)
+
+        for base in search_dirs:
+            source = "primary" if base == self.base_dir else "fallback"
+
+            for stage in stages:
+                stage_dir = base / stage.value
+
+                if not stage_dir.exists():
+                    continue
+
+                for obj_dir in stage_dir.iterdir():
+                    if not obj_dir.is_dir():
+                        continue
+
+                    meta_path = obj_dir / "metadata.json"
+                    if not meta_path.exists():
+                        continue
+
+                    try:
+                        with open(meta_path, 'r') as f:
+                            metadata = json.load(f)
+
+                        objects.append({
+                            'name': metadata['name'],
+                            'stage': metadata['stage'],
+                            'directory': str(obj_dir),
+                            'source': source,  # Mark source
+                            **metadata
+                        })
+                    except Exception as e:
+                        print(f"Error loading {obj_dir}: {e}")
+
+        return sorted(objects, key=lambda x: x.get('created_at', ''), reverse=True)
 
     def save(self, data_obj: DataObject) -> Path:
         """
@@ -164,124 +273,6 @@ class DataObjectManager:
         self._generate_readme(obj_dir, data_obj)
 
         return obj_dir
-
-    def load(self, name: str, stage: PipelineStage) -> Optional[DataObject]:
-        """
-        Load DataObject from disk
-
-        Args:
-            name: Object name
-            stage: Pipeline stage
-
-        Returns:
-            DataObject or None if not found
-        """
-        obj_dir = self.base_dir / stage.value / name
-
-        if not obj_dir.exists():
-            return None
-
-        # Load metadata
-        meta_path = obj_dir / "metadata.json"
-        if not meta_path.exists():
-            return None
-
-        with open(meta_path, 'r') as f:
-            metadata = json.load(f)
-
-        # Load dataframe
-        df_path = obj_dir / "data.xlsx"
-        if not df_path.exists():
-            return None
-
-        df = pd.read_excel(df_path)
-
-        # Load caches
-        namespace = metadata.get('namespace')
-        embeddings = self.cache_manager.load_embeddings(namespace)
-        scores = self.cache_manager.load_scores(namespace)
-
-        # Create DataObject
-        return DataObject(
-            name=metadata['name'],
-            stage=PipelineStage(metadata['stage']),
-            df=df,
-            passage_col=metadata['passage_col'],
-            label_columns=metadata['label_columns'],
-            metadata_columns=metadata.get('metadata_columns', []),
-            parent=metadata.get('parent'),
-            created_at=metadata.get('created_at'),
-            namespace=namespace,
-            embeddings_cache=embeddings,
-            scores_cache=scores,
-            metadata=metadata.get('metadata', {})
-        )
-
-    def list_objects(self, stage: Optional[PipelineStage] = None) -> List[Dict]:
-        """
-        List all saved DataObjects
-
-        Args:
-            stage: Optional filter by stage
-
-        Returns:
-            List of object summaries
-        """
-        objects = []
-
-        if stage:
-            stages = [stage]
-        else:
-            stages = list(PipelineStage)
-
-        for stage in stages:
-            stage_dir = self.base_dir / stage.value
-
-            if not stage_dir.exists():
-                continue
-
-            for obj_dir in stage_dir.iterdir():
-                if not obj_dir.is_dir():
-                    continue
-
-                meta_path = obj_dir / "metadata.json"
-                if not meta_path.exists():
-                    continue
-
-                try:
-                    with open(meta_path, 'r') as f:
-                        metadata = json.load(f)
-
-                    objects.append({
-                        'name': metadata['name'],
-                        'stage': metadata['stage'],
-                        'directory': str(obj_dir),
-                        **metadata
-                    })
-                except Exception as e:
-                    print(f"Error loading {obj_dir}: {e}")
-
-        return sorted(objects, key=lambda x: x.get('created_at', ''), reverse=True)
-
-    def delete(self, name: str, stage: PipelineStage):
-        """Delete a DataObject and its caches"""
-        obj_dir = self.base_dir / stage.value / name
-
-        if obj_dir.exists():
-            # Load metadata to get namespace
-            meta_path = obj_dir / "metadata.json"
-            if meta_path.exists():
-                with open(meta_path, 'r') as f:
-                    metadata = json.load(f)
-                    namespace = metadata.get('namespace')
-
-                    # Clear caches
-                    if namespace:
-                        self.cache_manager.clear_cache(namespace)
-
-            # Remove directory
-            import shutil
-            shutil.rmtree(obj_dir)
 
     def _generate_readme(self, obj_dir: Path, data_obj: DataObject):
         """Generate README for data object"""
@@ -416,9 +407,14 @@ class DataPipeline:
             self,
             name: str,
             parent_obj: DataObject,
-            embeddings_cache: Dict[int, str]
+            embeddings_cache: Dict[str, str]  # stable_id -> pinecone_id
     ) -> DataObject:
-        """Create embedded data object"""
+        """
+        Create embedded data object
+
+        Args:
+            embeddings_cache: Mapping of stable_id -> pinecone_id (NOT df.index!)
+        """
         data_obj = DataObject(
             name=name,
             stage=PipelineStage.EMBEDDED,
@@ -427,11 +423,12 @@ class DataPipeline:
             label_columns=parent_obj.label_columns,
             metadata_columns=parent_obj.metadata_columns,
             parent=parent_obj.name,
-            namespace=parent_obj.namespace,  # ✅ PRESERVE namespace
-            embeddings_cache=embeddings_cache,
+            namespace=parent_obj.namespace,
+            embeddings_cache=embeddings_cache,  # Maps stable_id -> pinecone_id
             metadata={
                 'num_embedded': len(embeddings_cache),
-                'embedding_namespace': parent_obj.namespace  # Track where embeddings live
+                'embedding_namespace': parent_obj.namespace,
+                'cache_format': 'stable_id_based'  # Mark format
             }
         )
 

@@ -19,9 +19,6 @@ import sys
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-# Import core functionality
-from core.discovery_architecture import GoldenDatasetFinder
-
 
 def render():
     """Main render function for Discover page"""
@@ -61,17 +58,16 @@ def render():
 # ============================================================================
 
 def render_semantic_search_section():
-    """Semantic search with filters and reranking"""
+    """Simple semantic search with diagnostics"""
 
     st.markdown("### 🔍 Semantic Search")
 
-    # Check if embeddings exist
+    # Check prerequisites
     cache = st.session_state.get('cache', {})
-    has_embeddings = 'passage_id_map' in cache
+    has_embeddings = 'stable_id_to_pinecone' in cache
 
     if not has_embeddings:
-        st.warning("⚠️ Generate embeddings first")
-        st.info("Go to **Data** page → **Embed & Score** tab")
+        st.warning("⚠️ Generate embeddings first (Data page → Embed & Score)")
         return
 
     finder = st.session_state.get('finder')
@@ -80,139 +76,441 @@ def render_semantic_search_section():
     label_columns = st.session_state.label_columns
     passage_col = st.session_state.passage_col
 
-    st.markdown("#### Search Query")
+    # ========================================================================
+    # DIAGNOSTIC SECTION - ADD THIS
+    # ========================================================================
 
-    # Query input
-    query = st.text_area(
-        "Enter your search query:",
-        placeholder="Example: passages about shamans healing illness through spiritual intervention",
-        height=100,
-        key="semantic_query"
+    with st.expander("🔧 Diagnostics", expanded=False):
+        st.markdown("**Check if search is working correctly**")
+
+        # In diagnostic test section:
+        if st.button("Run Diagnostic Test"):
+            with st.spinner("Testing search pipeline..."):
+                # Pick a random passage
+                test_idx = np.random.choice(df.index)
+
+                # REQUIRE stable_id
+                if 'passage_id' not in df.columns:
+                    st.error("❌ DataFrame missing 'passage_id' column")
+                    st.info("Re-load data with updated code to add stable IDs")
+                    return
+
+                stable_id = df.loc[test_idx, 'passage_id']
+                if pd.isna(stable_id):
+                    st.error(f"❌ Passage {test_idx} missing stable_id")
+                    return
+
+                passage_id = f"passage_{stable_id}"
+                test_passage = str(df.loc[test_idx, passage_col])
+
+                st.markdown(f"**Test passage {test_idx}:**")
+                st.caption(f"Stable ID: {stable_id}")
+                st.caption(test_passage[:200] + "...")
+
+                try:
+                    # ✅ FIX: Use stable ID for lookup
+                    if 'passage_id' in df.columns:
+                        stable_id = df.loc[test_idx, 'passage_id']
+                        passage_id = f"passage_{stable_id}"
+                        st.info(f"🔑 Using stable ID: {stable_id}")
+                    else:
+                        # Fallback to old method
+                        passage_id = f"passage_{test_idx}"
+                        st.warning("⚠️ No stable IDs - using index-based ID")
+
+                    fetch_result = finder.index.fetch(ids=[passage_id], namespace=namespace)
+
+                    if hasattr(fetch_result, 'vectors'):
+                        vectors = fetch_result.vectors
+                    else:
+                        vectors = fetch_result.get('vectors', {})
+
+                    if passage_id not in vectors:
+                        st.error(f"❌ Passage {test_idx} NOT FOUND in Pinecone namespace '{namespace}'")
+                        st.info("**Fix:** Re-run embedding generation on Data page")
+                        return
+
+                    st.success(f"✅ Found in Pinecone")
+
+                    # Check 2: Does metadata match?
+                    vector_data = vectors[passage_id]
+                    if hasattr(vector_data, 'metadata'):
+                        metadata = vector_data.metadata
+                    else:
+                        metadata = vector_data.get('metadata', {})
+
+                    stored_text = metadata.get('text_preview', '')
+                    stored_idx = metadata.get('passage_idx')
+
+                    st.write(f"**Metadata passage_idx:** {stored_idx}")
+                    st.write(f"**Stored text preview:** {stored_text[:100]}...")
+
+                    if stored_text[:100] not in test_passage:
+                        st.error("❌ MISMATCH: Stored text doesn't match actual passage!")
+                        st.info("**Fix:** Re-run embedding generation")
+                        return
+
+                    st.success("✅ Metadata matches passage")
+
+                    # Check 3: Self-similarity test
+                    if hasattr(vector_data, 'values'):
+                        embedding = vector_data.values
+                    else:
+                        embedding = vector_data['values']
+
+                    search_results = finder.index.query(
+                        vector=embedding,
+                        top_k=5,
+                        namespace=namespace,
+                        include_metadata=True
+                    )
+
+                    if hasattr(search_results, 'matches'):
+                        matches = search_results.matches
+                    else:
+                        matches = search_results.get('matches', [])
+
+                    st.markdown("**Top 5 similar passages:**")
+
+                    for i, match in enumerate(matches):
+                        if hasattr(match, 'score'):
+                            score = match.score
+                            match_metadata = match.metadata
+                        else:
+                            score = match['score']
+                            match_metadata = match['metadata']
+
+                        match_idx = match_metadata['passage_idx']
+                        match_text = match_metadata.get('text_preview', '')[:100]
+
+                        st.write(f"{i + 1}. Index {match_idx} | Score: {score:.4f}")
+                        st.caption(f"   {match_text}...")
+
+                    # The first result should be itself with score ~1.0
+                    top_match = matches[0]
+                    if hasattr(top_match, 'score'):
+                        top_score = top_match.score
+                        top_metadata = top_match.metadata
+                    else:
+                        top_score = top_match['score']
+                        top_metadata = top_match['metadata']
+
+                    top_idx = top_metadata['passage_idx']
+
+                    if top_idx == test_idx and top_score > 0.99:
+                        st.success(f"✅ Self-similarity test PASSED (score: {top_score:.4f})")
+                        st.success("🎉 **Search pipeline is working correctly!**")
+                    else:
+                        st.error(f"❌ Self-similarity test FAILED")
+                        st.error(f"Expected: idx={test_idx}, score≈1.0")
+                        st.error(f"Got: idx={top_idx}, score={top_score:.4f}")
+                        st.info("**Fix:** Embeddings may be corrupted. Re-run embedding generation.")
+
+                except Exception as e:
+                    st.error(f"❌ Diagnostic failed: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+        st.markdown("---")
+        st.markdown("**Index Information:**")
+
+        try:
+            stats = finder.index.describe_index_stats()
+
+            if hasattr(stats, 'total_vector_count'):
+                total = stats.total_vector_count
+                namespaces = stats.namespaces
+            else:
+                total = stats.get('total_vector_count', 0)
+                namespaces = stats.get('namespaces', {})
+
+            st.write(f"**Total vectors:** {total}")
+            st.write(f"**Namespaces:** {list(namespaces.keys())}")
+            st.write(f"**Current namespace:** '{namespace}'")
+
+            if namespace in namespaces:
+                ns_count = namespaces[namespace].get('vector_count', 0) if hasattr(namespaces[namespace],
+                                                                                   'get') else getattr(
+                    namespaces[namespace], 'vector_count', 0)
+                st.write(f"**Vectors in '{namespace}':** {ns_count}")
+            else:
+                st.error(f"❌ Namespace '{namespace}' NOT FOUND in index!")
+                st.info("**Available namespaces:** " + ", ".join(list(namespaces.keys())))
+                st.info("**Fix:** Check namespace on Data page or re-run embeddings")
+
+        except Exception as e:
+            st.error(f"Could not get index stats: {e}")
+
+    # ========================================================================
+    # SIMPLE SEARCH INTERFACE
+    # ========================================================================
+
+    query = st.text_input(
+        "What are you looking for?",
+        placeholder="Example: pottery, shamans healing illness, spirit possession",
+        key="search_query"
     )
 
-    # Advanced options
-    with st.expander("⚙️ Advanced Options"):
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        num_results = st.slider("Number of results:", 5, 50, 10, 5)
+
+    with col2:
+        use_rerank = st.checkbox("Use AI reranking", value=True, help="Better results, slightly slower")
+
+    # Advanced options (collapsed by default)
+    with st.expander("⚙️ Advanced Options", expanded=False):
         col1, col2 = st.columns(2)
 
         with col1:
-            top_k_vector = st.slider(
-                "Vector search candidates:",
-                10, 200, 100,
-                help="Number of passages from initial vector search"
-            )
+            st.markdown("**Filters:**")
 
             label_filter = st.selectbox(
-                "Filter by label:",
+                "Must have label:",
                 ["None"] + label_columns,
-                help="Only search passages with this label"
+                key="search_label_filter"
+            )
+
+            min_similarity = st.slider(
+                "Min similarity:",
+                0.0, 1.0, 0.0, 0.05,
+                help="Filter out low-similarity results"
             )
 
         with col2:
-            top_k_rerank = st.slider(
-                "Final results:",
-                5, 50, 10,
-                help="Number of results after reranking"
-            )
+            st.markdown("**Scoring:**")
 
-            use_rerank = st.checkbox(
-                "Use reranking",
-                value=True,
-                help="Rerank with instruction-following model"
-            )
+            if use_rerank:
+                vector_weight = st.slider(
+                    "Vector weight:",
+                    0.0, 1.0, 0.3, 0.1,
+                    help="Balance between vector similarity and AI reranking"
+                )
+            else:
+                vector_weight = 1.0
 
-    # Rerank instruction
-    if use_rerank:
-        rerank_instruction = st.text_input(
-            "Rerank instruction (optional):",
-            placeholder="Prioritize passages with clear, detailed descriptions",
-            key="rerank_instruction"
-        )
-    else:
-        rerank_instruction = None
+    # ========================================================================
+    # SEARCH EXECUTION
+    # ========================================================================
 
-    # Search button
-    if st.button("🔍 Search", type="primary", disabled=not query):
+    col1, col2 = st.columns([3, 1])
+
+    with col1:
+        search_btn = st.button("🔍 Search", type="primary", disabled=not query, width='stretch')
+
+    with col2:
+        if st.button("Clear", width='stretch'):
+            if 'search_results' in st.session_state:
+                del st.session_state['search_results']
+            st.rerun()
+
+    if search_btn and query:
         with st.spinner("Searching..."):
             try:
-                # Prepare filter
-                label_filter_value = None if label_filter == "None" else label_filter
+                # Step 1: Get query embedding
+                query_embedding = finder.voyage.embed(
+                    texts=[query],
+                    model="voyage-3-large",
+                    input_type="query"
+                ).embeddings[0]
 
-                # Search
-                results = finder.search_with_filters(
-                    query=query,
+                # Step 2: Build Pinecone filter
+                pinecone_filter = None
+                if label_filter and label_filter != "None":
+                    pinecone_filter = {f"label_{label_filter}": {"$eq": 1}}
+
+                # Step 3: Vector search (FIXED)
+                search_results = finder.index.query(
+                    vector=query_embedding,
+                    top_k=num_results * 3 if use_rerank else num_results,
                     namespace=namespace,
-                    label_filter=label_filter_value,
-                    top_k_vector=top_k_vector,
-                    top_k_rerank=top_k_rerank if use_rerank else top_k_vector,
-                    rerank_instruction=rerank_instruction if use_rerank else None
+                    include_metadata=True,
+                    filter=pinecone_filter
                 )
 
-                if not results:
-                    st.warning("No results found. Try adjusting your query or filters.")
+                # Extract matches
+                if hasattr(search_results, 'matches'):
+                    matches = search_results.matches
+                else:
+                    matches = search_results.get('matches', [])
+
+                # Convert to standard format - CRITICAL FIX
+                candidates = []
+                for match in matches:
+                    if hasattr(match, 'score'):
+                        score = match.score
+                        metadata = match.metadata
+                        match_id = match.id
+                    else:
+                        score = match['score']
+                        metadata = match['metadata']
+                        match_id = match['id']
+
+                    if score >= min_similarity:
+                        # CRITICAL: Map back using stable_id, not stored passage_idx
+                        stable_id = metadata.get('stable_id')
+
+                        if not stable_id:
+                            continue  # Skip if no stable_id
+
+                        # Find current DataFrame row with this stable_id
+                        matching_rows = df[df['passage_id'] == stable_id]
+
+                        if matching_rows.empty:
+                            continue  # Passage not in current dataset
+
+                        passage_idx = matching_rows.index[0]
+
+                        candidates.append({
+                            'passage_idx': passage_idx,  # Current DataFrame index
+                            'vector_score': score,
+                            'text_preview': metadata.get('text_preview', ''),
+                            'metadata': metadata,
+                            'stable_id': stable_id
+                        })
+
+                if not candidates:
+                    st.warning("No results found. Try:")
+                    st.info("• Different search terms\n• Lower minimum similarity\n• Remove label filter")
                     return
+
+                # Step 4: Optional reranking
+                if use_rerank and len(candidates) > num_results:
+                    st.caption(f"🔄 Reranking {len(candidates)} candidates...")
+
+                    texts = [c['text_preview'] for c in candidates]
+
+                    rerank_result = finder.voyage.rerank(
+                        query=query,
+                        documents=texts,
+                        model="rerank-2.5",
+                        top_k=num_results
+                    )
+
+                    # Combine scores
+                    reranked = []
+                    for result in rerank_result.results:
+                        candidate = candidates[result.index].copy()
+                        candidate['rerank_score'] = result.relevance_score
+                        candidate['combined_score'] = (
+                                vector_weight * candidate['vector_score'] +
+                                (1 - vector_weight) * result.relevance_score
+                        )
+                        reranked.append(candidate)
+
+                    results = sorted(reranked, key=lambda x: x['combined_score'], reverse=True)
+                else:
+                    # No reranking - use vector scores
+                    for c in candidates:
+                        c['combined_score'] = c['vector_score']
+                    results = sorted(candidates, key=lambda x: x['combined_score'], reverse=True)[:num_results]
 
                 # Store results
                 st.session_state['search_results'] = results
-
                 st.success(f"✅ Found {len(results)} results")
 
             except Exception as e:
-                st.error(f"❌ Search error: {e}")
+                st.error(f"❌ Search failed: {str(e)}")
+                import traceback
+                with st.expander("Debug info"):
+                    st.code(traceback.format_exc())
+                    st.write("**Namespace:**", namespace)
+                    st.write("**Index stats:**")
+                    try:
+                        stats = finder.index.describe_index_stats()
+                        st.json(stats if isinstance(stats, dict) else stats.__dict__)
+                    except Exception as e2:
+                        st.write(f"Could not get stats: {e2}")
 
-    # Display results
+    # ========================================================================
+    # RESULTS DISPLAY
+    # ========================================================================
+
     if 'search_results' in st.session_state:
         results = st.session_state['search_results']
 
         st.markdown("---")
-        st.markdown(f"#### 📊 Results ({len(results)})")
 
+        # Quick stats
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Results", len(results))
+        with col2:
+            avg_score = np.mean([r['combined_score'] for r in results])
+            st.metric("Avg Score", f"{avg_score:.3f}")
+        with col3:
+            if results[0].get('rerank_score'):
+                st.metric("Method", "Vector + Rerank")
+            else:
+                st.metric("Method", "Vector Only")
+
+        # Export
+        with st.expander("💾 Export"):
+            export_data = []
+            for i, result in enumerate(results):
+                idx = result['passage_idx']
+                if idx in df.index:
+                    export_data.append({
+                        'rank': i + 1,
+                        'passage_idx': idx,
+                        'score': result['combined_score'],
+                        'passage': df.loc[idx, passage_col]
+                    })
+
+            if export_data:
+                csv = pd.DataFrame(export_data).to_csv(index=False)
+                st.download_button(
+                    "📥 Download CSV",
+                    csv,
+                    f"search_{len(results)}.csv",
+                    "text/csv"
+                )
+
+        st.markdown("---")
+
+        # Display results
         for i, result in enumerate(results):
-            passage_idx = result['passage_idx']
+            idx = result['passage_idx']
 
-            # Get full passage
-            if passage_idx in df.index:
-                passage_text = df.loc[passage_idx, passage_col]
+            if idx not in df.index:
+                continue
 
-                # Get labels
-                active_labels = [label for label in label_columns
-                               if df.loc[passage_idx, label] == 1]
+            passage = df.loc[idx, passage_col]
+            labels = [lbl for lbl in label_columns if df.loc[idx, lbl] == 1]
 
-                with st.expander(f"**Result {i+1}** | Score: {result.get('combined_score', result.get('vector_score', 0)):.3f}", expanded=(i==0)):
-                    # Metadata
-                    col1, col2, col3 = st.columns(3)
+            # Card title
+            score = result['combined_score']
+            title = f"#{i + 1} | Score: {score:.3f}"
 
-                    with col1:
-                        st.caption(f"**Index:** {passage_idx}")
+            if result.get('rerank_score'):
+                title += f" (V:{result['vector_score']:.2f} R:{result['rerank_score']:.2f})"
 
-                    with col2:
-                        if 'vector_score' in result:
-                            st.caption(f"**Vector:** {result['vector_score']:.3f}")
+            with st.expander(title, expanded=(i < 3)):
+                # Metadata
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    st.caption(f"**Index:** {idx}")
+                with col2:
+                    if labels:
+                        st.caption(f"**Labels:** {', '.join(labels)}")
 
-                    with col3:
-                        if 'rerank_score' in result:
-                            st.caption(f"**Rerank:** {result['rerank_score']:.3f}")
+                # Passage text
+                st.markdown(passage)
 
-                    # Labels
-                    if active_labels:
-                        st.markdown(f"**Labels:** {', '.join(active_labels)}")
+                # Actions
+                st.markdown("---")
+                act_col1, act_col2 = st.columns(2)
 
-                    # Passage text
-                    st.markdown("**Passage:**")
-                    st.markdown(f"> {passage_text}")
+                with act_col1:
+                    if st.button("🔗 Find Similar", key=f"sim_{idx}_{i}"):
+                        st.session_state['similar_query_idx'] = idx
+                        st.info("💡 Switch to 'Similar Passages' tab")
 
-                    # Actions
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        if st.button("🔗 Find Similar", key=f"similar_{passage_idx}_{i}"):
-                            st.session_state['similar_query_idx'] = passage_idx
-                            st.rerun()
-
-                    with col2:
-                        if st.button("🤖 Run Models", key=f"infer_{passage_idx}_{i}"):
-                            st.session_state['inference_passage_idx'] = passage_idx
-                            st.rerun()
-
+                with act_col2:
+                    if st.button("🤖 Run Models", key=f"inf_{idx}_{i}"):
+                        st.session_state['inference_passage_idx'] = idx
+                        st.info("💡 Switch to 'Model Inference' tab")
 
 # ============================================================================
 # SIMILAR PASSAGES
@@ -225,7 +523,7 @@ def render_similar_passages_section():
 
     # Check if embeddings exist
     cache = st.session_state.get('cache', {})
-    has_embeddings = 'passage_id_map' in cache
+    has_embeddings = 'stable_id_to_pinecone' in cache
 
     if not has_embeddings:
         st.warning("⚠️ Generate embeddings first")
@@ -283,11 +581,13 @@ def render_similar_passages_section():
             try:
                 label_filter_value = None if label_filter == "None" else label_filter
 
+                # ✅ FIX: Pass dataframe for stable ID lookup
                 similar = finder.search_similar_to_passage(
                     passage_idx=query_idx,
                     namespace=namespace,
                     k=k,
-                    label_filter=label_filter_value
+                    label_filter=label_filter_value,
+                    df=df  # Add this!
                 )
 
                 if not similar:
@@ -299,6 +599,9 @@ def render_similar_passages_section():
 
             except Exception as e:
                 st.error(f"❌ Error: {e}")
+                import traceback
+                with st.expander("Debug info"):
+                    st.code(traceback.format_exc())
 
     # Display results
     if 'similar_results' in st.session_state:
@@ -361,8 +664,11 @@ def render_inference_section():
     if passage_idx in df.index:
         with st.expander("📄 Passage", expanded=True):
             passage_text = df.loc[passage_idx, passage_col]
-            actual_labels = {label: int(df.loc[passage_idx, label])
-                           for label in label_columns}
+            actual_labels = {}
+            for label in label_columns:
+                val = df.loc[passage_idx, label]
+                actual_labels[label] = int(val) if pd.notna(val) else 0
+
             active_labels = [label for label, val in actual_labels.items() if val == 1]
 
             st.caption(f"**Index:** {passage_idx}")

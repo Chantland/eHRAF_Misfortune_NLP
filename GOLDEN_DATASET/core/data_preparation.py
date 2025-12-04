@@ -212,6 +212,46 @@ class DataSegmenter:
         self.df = df
         self.scores_df = scores_df
         self.label_columns = label_columns
+        max_no_label_passages: int = 0
+
+    def filter_no_label_passages(
+            self,
+            df: pd.DataFrame,
+            max_no_label: int = 0,
+            random_state: int = 42
+    ) -> pd.DataFrame:
+        """
+        Filter out excess passages with no labels
+
+        Args:
+            df: DataFrame with label columns
+            max_no_label: Maximum number of no-label passages to keep (0 = remove all, -1 = keep all)
+            random_state: Random seed for sampling
+
+        Returns:
+            Filtered DataFrame
+        """
+        if max_no_label == -1:
+            # Keep all passages
+            return df.copy()
+
+        if max_no_label == 0:
+            # Remove all no-label passages
+            return df[df[self.label_columns].sum(axis=1) > 0].copy()
+
+        # Separate labeled and unlabeled
+        has_labels = df[df[self.label_columns].sum(axis=1) > 0]
+        no_labels = df[df[self.label_columns].sum(axis=1) == 0]
+
+        # Sample max_no_label from unlabeled
+        if len(no_labels) > max_no_label:
+            no_labels_sample = no_labels.sample(n=max_no_label, random_state=random_state)
+        else:
+            no_labels_sample = no_labels
+
+        # Combine
+        result = pd.concat([has_labels, no_labels_sample])
+        return result
 
     def create_quality_tiers(
             self,
@@ -220,7 +260,7 @@ class DataSegmenter:
             label_targets: Optional[Dict] = None
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict]:
         """
-        Create quality-based tiers for curriculum learning
+        Create quality-based tiers for curriculum learning using STABLE IDs
 
         Args:
             tier1_config: Config for elite tier (min/max consistency/rerank, target_size)
@@ -236,13 +276,39 @@ class DataSegmenter:
         if len(self.df) == 0:
             raise ValueError("Dataset is empty")
 
-        # Get valid scored indices
-        valid_indices = self.scores_df['passage_idx'].tolist()
+        # ✅ FIX: Ensure we have stable_id column
+        if 'passage_id' not in self.df.columns:
+            raise ValueError("DataFrame must have 'passage_id' column for stable references")
 
-        if len(valid_indices) == 0:
-            raise ValueError("No valid scored passages found")
+        # ✅ FIX: Work with stable_ids, not DataFrame indices
+        # Build mapping: stable_id -> current df.index
+        stable_id_to_index = {}
+        for idx in self.df.index:
+            stable_id = self.df.loc[idx, 'passage_id']
+            if pd.notna(stable_id):
+                stable_id_to_index[stable_id] = idx
 
-        scores_df = self.scores_df.copy()
+        # ✅ FIX: Ensure scores_df has stable_id column
+        if 'stable_id' not in self.scores_df.columns:
+            # Try to reconstruct from passage_idx
+            if 'passage_idx' in self.scores_df.columns:
+                self.scores_df['stable_id'] = self.scores_df['passage_idx'].map(
+                    lambda idx: self.df.loc[idx, 'passage_id'] if idx in self.df.index else None
+                )
+            else:
+                raise ValueError("scores_df missing both 'stable_id' and 'passage_idx' columns")
+
+        # Get valid scored stable_ids (those that still exist in current DataFrame)
+        valid_stable_ids = [
+            sid for sid in self.scores_df['stable_id'].dropna().unique()
+            if sid in stable_id_to_index
+        ]
+
+        if len(valid_stable_ids) == 0:
+            raise ValueError("No valid scored passages found in current DataFrame")
+
+        # Work with scores for valid passages only
+        scores_df = self.scores_df[self.scores_df['stable_id'].isin(valid_stable_ids)].copy()
         scores_df['composite'] = (scores_df['consistency_avg'] + scores_df['rerank_avg']) / 2
 
         # TIER 1: Elite training data
@@ -257,17 +323,20 @@ class DataSegmenter:
 
         # Apply label targeting if specified
         if label_targets and 'tier1' in label_targets:
-            tier1_indices = self._apply_label_targeting(
-                tier1_candidates, label_targets['tier1'], tier1_config.get('target_size', 1000)
+            tier1_stable_ids = self._apply_label_targeting_stable(
+                tier1_candidates,
+                label_targets['tier1'],
+                tier1_config.get('target_size', 1000),
+                stable_id_to_index
             )
         else:
             tier1_candidates = tier1_candidates.sort_values('composite', ascending=False)
-            target_count = tier1_config.get('target_size', int(len(valid_indices) * 0.12))
-            tier1_indices = tier1_candidates.head(target_count)['passage_idx'].tolist()
+            target_count = tier1_config.get('target_size', int(len(valid_stable_ids) * 0.12))
+            tier1_stable_ids = tier1_candidates.head(target_count)['stable_id'].tolist()
 
         # TIER 2: Expansion training data
-        remaining_indices = [idx for idx in valid_indices if idx not in tier1_indices]
-        remaining_scores = scores_df[scores_df['passage_idx'].isin(remaining_indices)]
+        remaining_stable_ids = [sid for sid in valid_stable_ids if sid not in tier1_stable_ids]
+        remaining_scores = scores_df[scores_df['stable_id'].isin(remaining_stable_ids)]
 
         tier2_mask = (
                 (remaining_scores['consistency_avg'] >= tier2_config['min_consistency']) &
@@ -280,47 +349,126 @@ class DataSegmenter:
 
         # Apply label targeting if specified
         if label_targets and 'tier2' in label_targets:
-            tier2_indices = self._apply_label_targeting(
-                tier2_candidates, label_targets['tier2'], tier2_config.get('target_size', 2000)
+            tier2_stable_ids = self._apply_label_targeting_stable(
+                tier2_candidates,
+                label_targets['tier2'],
+                tier2_config.get('target_size', 2000),
+                stable_id_to_index
             )
         else:
             tier2_candidates = tier2_candidates.sort_values('composite', ascending=False)
-            target_count = tier2_config.get('target_size', int(len(valid_indices) * 0.25))
-            tier2_indices = tier2_candidates.head(target_count)['passage_idx'].tolist()
+            target_count = tier2_config.get('target_size', int(len(valid_stable_ids) * 0.25))
+            tier2_stable_ids = tier2_candidates.head(target_count)['stable_id'].tolist()
 
         # INFERENCE: Everything else
-        inference_indices = [idx for idx in valid_indices
-                             if idx not in tier1_indices and idx not in tier2_indices]
+        inference_stable_ids = [
+            sid for sid in valid_stable_ids
+            if sid not in tier1_stable_ids and sid not in tier2_stable_ids
+        ]
 
-        # Create dataframes
+        # ✅ FIX: Create dataframes using stable_id -> current index mapping
+        tier1_indices = [stable_id_to_index[sid] for sid in tier1_stable_ids if sid in stable_id_to_index]
+        tier2_indices = [stable_id_to_index[sid] for sid in tier2_stable_ids if sid in stable_id_to_index]
+        inference_indices = [stable_id_to_index[sid] for sid in inference_stable_ids if sid in stable_id_to_index]
+
         tier1_df = self.df.loc[tier1_indices].copy()
         tier2_df = self.df.loc[tier2_indices].copy()
         inference_df = self.df.loc[inference_indices].copy()
 
-        # Add confidence scores
-        for tier_df, indices in [(tier1_df, tier1_indices),
-                                 (tier2_df, tier2_indices),
-                                 (inference_df, inference_indices)]:
-            for idx in indices:
-                if idx in scores_df['passage_idx'].values:
-                    score_row = scores_df[scores_df['passage_idx'] == idx].iloc[0]
+        # Add confidence scores using stable_id
+        for tier_df, stable_ids in [
+            (tier1_df, tier1_stable_ids),
+            (tier2_df, tier2_stable_ids),
+            (inference_df, inference_stable_ids)
+        ]:
+            for stable_id in stable_ids:
+                if stable_id not in stable_id_to_index:
+                    continue
+
+                idx = stable_id_to_index[stable_id]
+
+                if idx not in tier_df.index:
+                    continue
+
+                # Find score row for this stable_id
+                score_rows = scores_df[scores_df['stable_id'] == stable_id]
+                if not score_rows.empty:
+                    score_row = score_rows.iloc[0]
                     tier_df.loc[idx, 'confidence_composite'] = score_row['composite']
                     tier_df.loc[idx, 'confidence_consistency'] = score_row['consistency_avg']
                     tier_df.loc[idx, 'confidence_rerank'] = score_row['rerank_avg']
+
+                # Filter no-label passages if requested
+                if max_no_label_passages >= 0:
+                    original_t1_len = len(tier1_df)
+                    original_t2_len = len(tier2_df)
+
+                    tier1_df = self.filter_no_label_passages(tier1_df, max_no_label_passages)
+                    tier2_df = self.filter_no_label_passages(tier2_df, max_no_label_passages)
+
+                    removed_t1 = original_t1_len - len(tier1_df)
+                    removed_t2 = original_t2_len - len(tier2_df)
+
+                    if removed_t1 > 0 or removed_t2 > 0:
+                        st.info(f"🧹 Filtered no-label passages: Tier1 -{removed_t1}, Tier2 -{removed_t2}")
+
+                # Generate metadata
+                metadata = self._generate_tier_metadata(tier1_df, tier2_df, inference_df)
+
+                # ADD THIS:
+                metadata['no_label_filtering'] = {
+                    'max_allowed': max_no_label_passages,
+                    'tier1_no_labels': int((tier1_df[self.label_columns].sum(axis=1) == 0).sum()),
+                    'tier2_no_labels': int((tier2_df[self.label_columns].sum(axis=1) == 0).sum()),
+                    'inference_no_labels': int((inference_df[self.label_columns].sum(axis=1) == 0).sum())
+                }
+
+                return tier1_df, tier2_df, inference_df, metadata
 
         # Generate metadata
         metadata = self._generate_tier_metadata(tier1_df, tier2_df, inference_df)
 
         return tier1_df, tier2_df, inference_df, metadata
 
-    def _apply_label_targeting(
+    def calculate_label_frequencies(self) -> Dict[str, Dict]:
+        """Calculate label statistics for tier planning"""
+
+        stats = {}
+
+        for label in self.label_columns:
+            count = int((self.df[label] == 1).sum())
+            freq = count / len(self.df)
+
+            stats[label] = {
+                'count': count,
+                'frequency': freq,
+                'rarity': 'very_rare' if freq < 0.05 else 'rare' if freq < 0.15 else 'common',
+                'recommended_min_tier1': max(30, int(count * 0.3)),  # At least 30 or 30% of total
+                'recommended_min_tier2': max(50, int(count * 0.5))  # At least 50 or 50% of total
+            }
+
+        return stats
+
+    def _apply_label_targeting_stable(
             self,
-            candidates: pd.DataFrame,
+            candidates: pd.DataFrame,  # Has 'stable_id' column
             targets: Dict,
-            target_size: int
-    ) -> List[int]:
-        """Select passages to meet label-specific targets"""
-        selected_indices = []
+            target_size: int,
+            stable_id_to_index: Dict[str, int]
+    ) -> List[str]:
+        """
+        Select passages to meet label-specific targets using stable IDs
+
+        Args:
+            candidates: DataFrame with 'stable_id' and score columns
+            targets: Dict mapping label -> target_count
+            target_size: Total target size
+            stable_id_to_index: Mapping of stable_id -> current df.index
+
+        Returns:
+            List of selected stable_ids
+        """
+        selected_stable_ids = []
         remaining_candidates = candidates.copy()
 
         # Priority labels first
@@ -329,28 +477,36 @@ class DataSegmenter:
                 continue
 
             # Find candidates with this label
-            label_candidates = []
-            for idx in remaining_candidates['passage_idx'].tolist():
-                if idx in self.df.index and self.df.loc[idx, label] == 1:
-                    label_candidates.append(idx)
+            label_stable_ids = []
+            for stable_id in remaining_candidates['stable_id'].tolist():
+                if stable_id not in stable_id_to_index:
+                    continue
+
+                idx = stable_id_to_index[stable_id]
+
+                if idx not in self.df.index:
+                    continue
+
+                if self.df.loc[idx, label] == 1:
+                    label_stable_ids.append(stable_id)
 
             # Take up to target_count
-            selected = label_candidates[:target_count]
-            selected_indices.extend(selected)
+            selected = label_stable_ids[:target_count]
+            selected_stable_ids.extend(selected)
 
             # Remove from candidates
             remaining_candidates = remaining_candidates[
-                ~remaining_candidates['passage_idx'].isin(selected)
+                ~remaining_candidates['stable_id'].isin(selected)
             ]
 
         # Fill remaining with top-scoring passages
-        remaining_needed = target_size - len(selected_indices)
+        remaining_needed = target_size - len(selected_stable_ids)
         if remaining_needed > 0:
             remaining_candidates = remaining_candidates.sort_values('composite', ascending=False)
-            additional = remaining_candidates.head(remaining_needed)['passage_idx'].tolist()
-            selected_indices.extend(additional)
+            additional = remaining_candidates.head(remaining_needed)['stable_id'].tolist()
+            selected_stable_ids.extend(additional)
 
-        return selected_indices[:target_size]
+        return selected_stable_ids[:target_size]
 
     def _generate_tier_metadata(
             self,
@@ -398,682 +554,327 @@ class DataSegmenter:
 
         return metadata
 
-    def create_custom_segment(self, filters: Dict) -> pd.DataFrame:
-        """Create custom data segment based on filters"""
-        df_filtered = self.df.copy()
-
-        # Label filters
-        if 'required_labels' in filters and filters['required_labels']:
-            for label in filters['required_labels']:
-                df_filtered = df_filtered[df_filtered[label] == 1]
-
-        if 'excluded_labels' in filters and filters['excluded_labels']:
-            for label in filters['excluded_labels']:
-                df_filtered = df_filtered[df_filtered[label] == 0]
-
-        # Label count filter
-        if 'min_labels' in filters:
-            label_count = df_filtered[self.label_columns].sum(axis=1)
-            df_filtered = df_filtered[label_count >= filters['min_labels']]
-
-        if 'max_labels' in filters:
-            label_count = df_filtered[self.label_columns].sum(axis=1)
-            df_filtered = df_filtered[label_count <= filters['max_labels']]
-
-        # Quality filters (if scores available)
-        if self.scores_df is not None:
-            scored_indices = self.scores_df['passage_idx'].tolist()
-            df_filtered = df_filtered[df_filtered.index.isin(scored_indices)]
-
-            if 'min_consistency' in filters:
-                valid_indices = self.scores_df[
-                    self.scores_df['consistency_avg'] >= filters['min_consistency']
-                    ]['passage_idx'].tolist()
-                df_filtered = df_filtered[df_filtered.index.isin(valid_indices)]
-
-            if 'min_rerank' in filters:
-                valid_indices = self.scores_df[
-                    self.scores_df['rerank_avg'] >= filters['min_rerank']
-                    ]['passage_idx'].tolist()
-                df_filtered = df_filtered[df_filtered.index.isin(valid_indices)]
-
-        return df_filtered
-
-class DataExperiment:
-    """Manages data experiments with full lineage tracking"""
-
-    def __init__(self, base_dir: str = "data/experiments"):
-        self.base_dir = Path(base_dir)
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-
-    def create_experiment(
+    def create_stratified_quality_tiers(
             self,
-            name: str,
-            df: pd.DataFrame,
-            experiment_type: str,
-            metadata: Dict,
-            session_state: Dict
-    ) -> Path:
+            tier1_config: Dict,
+            tier2_config: Dict,
+            label_targets: Optional[Dict] = None,
+            max_no_label_passages: int = 0
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict]:
         """
-        Create a new data experiment with full tracking
+        Enhanced tiering with GUARANTEED rare label representation
+
+        Combines quality scores with label diversity to ensure rare labels are learned.
 
         Args:
-            name: Experiment name (will be sanitized)
-            df: DataFrame to save
-            experiment_type: 'cleaned', 'segment', 'tier', etc.
-            metadata: Additional metadata
-            session_state: Streamlit session state for lineage
+            tier1_config: {'min_consistency', 'min_rerank', 'target_size'}
+            tier2_config: Same as tier1
+            label_targets: {'tier1': {'Material_Physical': 50, ...}, 'tier2': {...}}
 
         Returns:
-            Path to experiment directory
+            (tier1_df, tier2_df, inference_df, metadata)
         """
-        # Create experiment directory with timestamp
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        safe_name = self._sanitize_name(name)
-        exp_dir = self.base_dir / f"{safe_name}_{timestamp}"
-        exp_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save data
-        data_path = exp_dir / "data.xlsx"
-        df.to_excel(data_path, index=False, engine='openpyxl')
+        if self.scores_df is None:
+            raise ValueError("Quality scores required")
 
-        # Build comprehensive metadata
-        full_metadata = self._build_metadata(
-            df, experiment_type, metadata, session_state
+        if 'passage_id' not in self.df.columns:
+            raise ValueError("DataFrame must have 'passage_id' for stable references")
+
+        # Build stable_id mappings
+        stable_id_to_index = {}
+        for idx in self.df.index:
+            stable_id = self.df.loc[idx, 'passage_id']
+            if pd.notna(stable_id):
+                stable_id_to_index[stable_id] = idx
+
+        # Ensure scores_df has stable_id
+        if 'stable_id' not in self.scores_df.columns:
+            if 'passage_idx' in self.scores_df.columns:
+                self.scores_df['stable_id'] = self.scores_df['passage_idx'].map(
+                    lambda idx: self.df.loc[idx, 'passage_id'] if idx in self.df.index else None
+                )
+            else:
+                raise ValueError("scores_df missing both 'stable_id' and 'passage_idx'")
+
+        # Get valid scored stable_ids
+        valid_stable_ids = [
+            sid for sid in self.scores_df['stable_id'].dropna().unique()
+            if sid in stable_id_to_index
+        ]
+
+        if len(valid_stable_ids) == 0:
+            raise ValueError("No valid scored passages")
+
+        scores_df = self.scores_df[self.scores_df['stable_id'].isin(valid_stable_ids)].copy()
+
+        # Calculate label frequencies for diversity bonus
+        label_freqs = {
+            label: (self.df[label] == 1).sum() / len(self.df)
+            for label in self.label_columns
+        }
+
+        # Enhanced scoring: quality + diversity
+        scores_df['quality_score'] = (scores_df['consistency_avg'] + scores_df['rerank_avg']) / 2
+        scores_df['diversity_score'] = 0.0
+
+        # Add diversity bonus for rare labels
+        for stable_id in scores_df['stable_id']:
+            if stable_id not in stable_id_to_index:
+                continue
+
+            idx = stable_id_to_index[stable_id]
+            rare_label_count = 0
+
+            for label, freq in label_freqs.items():
+                if freq < 0.15 and idx in self.df.index and self.df.loc[idx, label] == 1:
+                    # Weight by rarity: rarer = higher bonus
+                    rare_label_count += (0.15 - freq) * 10  # Scale to 0-1.5 range
+
+            scores_df.loc[scores_df['stable_id'] == stable_id, 'diversity_score'] = rare_label_count
+
+        # Combined score: 70% quality, 30% diversity
+        scores_df['combined_score'] = 0.7 * scores_df['quality_score'] + 0.3 * (
+                scores_df['quality_score'] + scores_df['diversity_score']
         )
 
-        # Save metadata
-        meta_path = exp_dir / "metadata.json"
-        with open(meta_path, 'w') as f:
-            json.dump(full_metadata, f, indent=2)
+        # TIER 1: With label guarantees
+        tier1_stable_ids = self._select_tier_with_guarantees(
+            scores_df=scores_df,
+            target_size=tier1_config['target_size'],
+            min_consistency=tier1_config['min_consistency'],
+            min_rerank=tier1_config['min_rerank'],
+            label_targets=label_targets.get('tier1', {}) if label_targets else {},
+            label_freqs=label_freqs,
+            stable_id_to_index=stable_id_to_index,
+            tier_name="Tier 1"
+        )
 
-        # Generate README
-        readme_path = exp_dir / "README.md"
-        with open(readme_path, 'w') as f:
-            f.write(self._generate_readme(safe_name, full_metadata))
+        # TIER 2: Remaining + guarantees
+        remaining_scores = scores_df[~scores_df['stable_id'].isin(tier1_stable_ids)].copy()
 
-        return exp_dir
+        # Adjust tier2 targets (reduce by what tier1 already has)
+        tier2_targets = {}
+        if label_targets and 'tier2' in label_targets:
+            for label, target in label_targets['tier2'].items():
+                # Count how many of this label are in tier1
+                tier1_count = sum(
+                    1 for sid in tier1_stable_ids
+                    if sid in stable_id_to_index
+                    and stable_id_to_index[sid] in self.df.index
+                    and self.df.loc[stable_id_to_index[sid], label] == 1
+                )
+                # Reduce tier2 target accordingly
+                tier2_targets[label] = max(0, target - tier1_count)
 
-    def create_tier_experiment(
-            self,
-            name: str,
-            tier1: pd.DataFrame,
-            tier2: pd.DataFrame,
-            inference: pd.DataFrame,
-            tier_metadata: Dict,
-            session_state: Dict
-    ) -> Path:
-        """Create experiment for tiered datasets"""
+        tier2_stable_ids = self._select_tier_with_guarantees(
+            scores_df=remaining_scores,
+            target_size=tier2_config['target_size'],
+            min_consistency=tier2_config['min_consistency'],
+            min_rerank=tier2_config['min_rerank'],
+            label_targets=tier2_targets,
+            label_freqs=label_freqs,
+            stable_id_to_index=stable_id_to_index,
+            tier_name="Tier 2"
+        )
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        safe_name = self._sanitize_name(name)
-        exp_dir = self.base_dir / f"{safe_name}_{timestamp}"
-        exp_dir.mkdir(parents=True, exist_ok=True)
+        # INFERENCE: Rest
+        all_stable_ids = set(valid_stable_ids)
+        inference_stable_ids = list(
+            all_stable_ids - set(tier1_stable_ids) - set(tier2_stable_ids)
+        )
 
-        # Save all tiers
-        tier1.to_excel(exp_dir / "tier1.xlsx", index=False)
-        tier2.to_excel(exp_dir / "tier2.xlsx", index=False)
-        inference.to_excel(exp_dir / "inference.xlsx", index=False)
+        # Create DataFrames
+        tier1_indices = [stable_id_to_index[sid] for sid in tier1_stable_ids if sid in stable_id_to_index]
+        tier2_indices = [stable_id_to_index[sid] for sid in tier2_stable_ids if sid in stable_id_to_index]
+        inference_indices = [stable_id_to_index[sid] for sid in inference_stable_ids if sid in stable_id_to_index]
 
-        # Combined training set
-        combined = pd.concat([tier1, tier2])
-        combined.to_excel(exp_dir / "tier1_tier2_combined.xlsx", index=False)
+        tier1_df = self.df.loc[tier1_indices].copy()
+        tier2_df = self.df.loc[tier2_indices].copy()
+        inference_df = self.df.loc[inference_indices].copy()
 
-        # Build metadata
-        full_metadata = {
-            'experiment_name': safe_name,
-            'experiment_type': 'tiered_training',
-            'created_at': datetime.now().isoformat(),
-            'timestamp': timestamp,
+        # Add confidence scores
+        for tier_df, stable_ids in [(tier1_df, tier1_stable_ids),
+                                    (tier2_df, tier2_stable_ids),
+                                    (inference_df, inference_stable_ids)]:
+            for stable_id in stable_ids:
+                if stable_id not in stable_id_to_index:
+                    continue
 
-            # Provenance
-            'source': {
-                'original_file': session_state.get('selected_file', 'unknown'),
-                'original_namespace': session_state.get('namespace', 'unknown'),
-                'working_dataset': 'cleaned' if 'cleaned_df' in session_state else 'original'
-            },
+                idx = stable_id_to_index[stable_id]
+                if idx not in tier_df.index:
+                    continue
 
-            # Tier statistics
-            'tiers': {
-                'tier1': {
-                    'count': len(tier1),
-                    'percentage': len(tier1) / (len(tier1) + len(tier2) + len(inference)) * 100,
-                    'file': 'tier1.xlsx'
-                },
-                'tier2': {
-                    'count': len(tier2),
-                    'percentage': len(tier2) / (len(tier1) + len(tier2) + len(inference)) * 100,
-                    'file': 'tier2.xlsx'
-                },
-                'inference': {
-                    'count': len(inference),
-                    'percentage': len(inference) / (len(tier1) + len(tier2) + len(inference)) * 100,
-                    'file': 'inference.xlsx'
-                },
-                'combined': {
-                    'count': len(combined),
-                    'file': 'tier1_tier2_combined.xlsx'
-                }
-            },
+                score_rows = scores_df[scores_df['stable_id'] == stable_id]
+                if not score_rows.empty:
+                    score_row = score_rows.iloc[0]
+                    tier_df.loc[idx, 'confidence_quality'] = score_row['quality_score']
+                    tier_df.loc[idx, 'confidence_diversity'] = score_row['diversity_score']
+                    tier_df.loc[idx, 'confidence_combined'] = score_row['combined_score']
 
-            # Configuration used
-            'tier_configuration': tier_metadata,
+            # Filter no-label passages if requested
+        if max_no_label_passages >= 0:
+            original_t1_len = len(tier1_df)
+            original_t2_len = len(tier2_df)
 
-            # Data characteristics
-            'label_columns': session_state.get('label_columns', []),
-            'passage_column': session_state.get('passage_col', 'Passage'),
+            tier1_df = self.filter_no_label_passages(tier1_df, max_no_label_passages)
+            tier2_df = self.filter_no_label_passages(tier2_df, max_no_label_passages)
 
-            # Quality scores (if available)
-            'quality_scores_used': session_state.get('cache') is not None,
+            removed_t1 = original_t1_len - len(tier1_df)
+            removed_t2 = original_t2_len - len(tier2_df)
 
-            # Format info
-            'format': {
-                'header_type': 'single',
-                'header_row': 0,
-                'export_tool': 'HRAF_Data_Preparation_v1',
-                'compatible_with': ['model_training', 'compute_scores']
-            },
+            if removed_t1 > 0 or removed_t2 > 0:
+                st.info(f"🧹 Filtered no-label passages: Tier1 -{removed_t1}, Tier2 -{removed_t2}")
 
-            # Usage recommendations
-            'recommended_usage': {
-                'tier1_only': 'Initial training on highest quality data',
-                'tier1_tier2_combined': 'Full training with quality-stratified data',
-                'inference': 'Model evaluation and testing',
-                'curriculum_learning': 'Train on tier1 first, then fine-tune on combined'
-            }
+            # Generate metadata with verification
+        metadata = self._generate_stratified_metadata_with_verification(
+            tier1_df, tier2_df, inference_df, label_freqs, label_targets
+        )
+
+        # ADD THIS:
+        metadata['no_label_filtering'] = {
+            'max_allowed': max_no_label_passages,
+            'tier1_no_labels': int((tier1_df[self.label_columns].sum(axis=1) == 0).sum()),
+            'tier2_no_labels': int((tier2_df[self.label_columns].sum(axis=1) == 0).sum()),
+            'inference_no_labels': int((inference_df[self.label_columns].sum(axis=1) == 0).sum())
         }
 
-        # Save metadata
-        meta_path = exp_dir / "metadata.json"
-        with open(meta_path, 'w') as f:
-            json.dump(full_metadata, f, indent=2)
+        return tier1_df, tier2_df, inference_df, metadata
 
-        # Generate README
-        readme_content = self._generate_tier_readme(safe_name, full_metadata)
-        with open(exp_dir / "README.md", 'w') as f:
-            f.write(readme_content)
-
-        return exp_dir
-
-    def _build_metadata(
+    def _select_tier_with_guarantees(
             self,
-            df: pd.DataFrame,
-            experiment_type: str,
-            custom_metadata: Dict,
-            session_state: Dict
+            scores_df: pd.DataFrame,
+            target_size: int,
+            min_consistency: float,
+            min_rerank: float,
+            label_targets: Dict[str, int],
+            label_freqs: Dict[str, float],
+            stable_id_to_index: Dict,
+            tier_name: str
+    ) -> List[str]:
+        """
+        Select passages ensuring label guarantees WITHOUT sacrificing too much quality
+
+        Strategy:
+        1. Filter by minimum quality thresholds first
+        2. Reserve slots for rare label minimums from quality-filtered pool
+        3. Fill remaining with highest combined scores
+        """
+
+        # Phase 0: Filter by quality minimums
+        quality_filtered = scores_df[
+            (scores_df['consistency_avg'] >= min_consistency) &
+            (scores_df['rerank_avg'] >= min_rerank)
+            ].copy()
+
+        if len(quality_filtered) == 0:
+            st.warning(f"⚠️ {tier_name}: No passages meet quality minimums. Relaxing constraints...")
+            quality_filtered = scores_df.copy()
+
+        selected_stable_ids = []
+        reserved_by_label = {}
+
+        # Phase 1: Reserve for rare labels (from quality-filtered pool only)
+        if label_targets:
+            # Sort labels by rarity (rarest first) to prioritize
+            sorted_labels = sorted(
+                label_targets.keys(),
+                key=lambda l: label_freqs.get(l, 1.0)
+            )
+
+            for label in sorted_labels:
+                min_needed = label_targets[label]
+
+                if min_needed == 0:
+                    continue
+
+                # Find quality-filtered candidates with this label
+                label_candidates = []
+                for stable_id in quality_filtered['stable_id']:
+                    if stable_id in selected_stable_ids:
+                        continue
+
+                    if stable_id not in stable_id_to_index:
+                        continue
+
+                    idx = stable_id_to_index[stable_id]
+                    if idx not in self.df.index:
+                        continue
+
+                    if self.df.loc[idx, label] == 1:
+                        score_row = quality_filtered[quality_filtered['stable_id'] == stable_id]
+                        if not score_row.empty:
+                            label_candidates.append((stable_id, score_row.iloc[0]['combined_score']))
+
+                # Sort by combined score, take best
+                label_candidates.sort(key=lambda x: x[1], reverse=True)
+                reserved = [sid for sid, _ in label_candidates[:min_needed]]
+
+                reserved_by_label[label] = reserved
+                selected_stable_ids.extend(reserved)
+
+                # Show what we achieved
+                if len(reserved) < min_needed:
+                    st.warning(
+                        f"⚠️ {tier_name} - {label}: Only found {len(reserved)}/{min_needed} in quality-filtered pool")
+                else:
+                    st.success(f"✅ {tier_name} - {label}: Reserved {len(reserved)}/{min_needed}")
+
+        # Remove duplicates
+        selected_stable_ids = list(set(selected_stable_ids))
+
+        # Phase 2: Fill remaining with top quality scores
+        remaining_slots = target_size - len(selected_stable_ids)
+
+        if remaining_slots > 0:
+            remaining = quality_filtered[
+                ~quality_filtered['stable_id'].isin(selected_stable_ids)
+            ].copy()
+
+            remaining = remaining.sort_values('combined_score', ascending=False)
+            additional = remaining.head(remaining_slots)['stable_id'].tolist()
+            selected_stable_ids.extend(additional)
+
+        return selected_stable_ids[:target_size]
+
+    def _generate_stratified_metadata_with_verification(
+            self,
+            tier1_df: pd.DataFrame,
+            tier2_df: pd.DataFrame,
+            inference_df: pd.DataFrame,
+            label_freqs: Dict[str, float],
+            label_targets: Optional[Dict]
     ) -> Dict:
-        """Build comprehensive metadata for experiment"""
+        """Generate metadata showing whether targets were met"""
 
-        label_columns = session_state.get('label_columns', [])
+        metadata = self._generate_tier_metadata(tier1_df, tier2_df, inference_df)
 
-        metadata = {
-            'experiment_name': custom_metadata.get('name', 'unknown'),
-            'experiment_type': experiment_type,
-            'created_at': datetime.now().isoformat(),
-            'timestamp': datetime.now().strftime('%Y%m%d_%H%M%S'),
-
-            # Provenance - track lineage
-            'provenance': {
-                'source_file': session_state.get('selected_file', 'unknown'),
-                'source_namespace': session_state.get('namespace', 'unknown'),
-                'parent_experiment': custom_metadata.get('parent_experiment'),
-                'transformations_applied': custom_metadata.get('transformations', []),
-                'working_dataset_type': 'cleaned' if 'cleaned_df' in session_state else 'original'
-            },
-
-            # Dataset statistics
-            'statistics': {
-                'num_passages': len(df),
-                'num_columns': len(df.columns),
-                'columns': list(df.columns),
-                'label_columns': label_columns,
-                'passage_column': session_state.get('passage_col', 'Passage')
-            },
-
-            # Label distribution
-            'label_distribution': {},
-
-            # Quality metrics (if available)
-            'quality_metrics': {},
-
-            # Configuration
-            'configuration': custom_metadata.get('configuration', {}),
-
-            # Format information
-            'format': {
-                'header_type': 'single',
-                'header_row': 0,
-                'export_tool': 'HRAF_Data_Preparation_v1',
-                'compatible_with': ['model_training', 'compute_scores', 'data_prep']
+        # Add verification
+        if label_targets:
+            metadata['label_targeting'] = {
+                'enabled': True,
+                'verification': {}
             }
-        }
 
-        # Calculate label distribution
-        for label in label_columns:
-            if label in df.columns:
-                count = int((df[label] == 1).sum())
-                metadata['label_distribution'][label] = {
-                    'count': count,
-                    'percentage': float(count / len(df) * 100) if len(df) > 0 else 0
-                }
+            for tier_name, tier_df in [('tier1', tier1_df), ('tier2', tier2_df)]:
+                tier_key = 'tier1' if tier_name == 'tier1' else 'tier2'
 
-        # Add quality metrics if available
-        cache = session_state.get('cache')
-        if cache and 'df_summary' in cache:
-            scores_df = cache['df_summary']
-            valid_indices = [idx for idx in df.index if idx in scores_df['passage_idx'].values]
+                if tier_key not in label_targets:
+                    continue
 
-            if valid_indices:
-                subset_scores = scores_df[scores_df['passage_idx'].isin(valid_indices)]
-                metadata['quality_metrics'] = {
-                    'consistency_mean': float(subset_scores['consistency_avg'].mean()),
-                    'consistency_median': float(subset_scores['consistency_avg'].median()),
-                    'rerank_mean': float(subset_scores['rerank_avg'].mean()),
-                    'rerank_median': float(subset_scores['rerank_avg'].median()),
-                    'scored_passages': len(subset_scores)
-                }
+                verification = {}
+                for label, target in label_targets[tier_key].items():
+                    actual = int((tier_df[label] == 1).sum())
+                    met = actual >= target
 
-        # Merge custom metadata
-        metadata.update(custom_metadata)
+                    verification[label] = {
+                        'target': target,
+                        'actual': actual,
+                        'met': met,
+                        'percentage': (actual / len(tier_df) * 100) if len(tier_df) > 0 else 0,
+                        'global_frequency': label_freqs.get(label, 0) * 100
+                    }
+
+                metadata['label_targeting']['verification'][tier_name] = verification
 
         return metadata
-
-    def _generate_readme(self, name: str, metadata: Dict) -> str:
-        """Generate README for experiment"""
-
-        readme = f"""# Data Experiment: {name}
-
-**Created:** {metadata['created_at']}  
-**Type:** {metadata['experiment_type']}
-
-## Overview
-
-This dataset was created using the HRAF Data Preparation tool.
-
-### Dataset Statistics
-- **Passages:** {metadata['statistics']['num_passages']:,}
-- **Labels:** {len(metadata['statistics']['label_columns'])}
-- **Columns:** {metadata['statistics']['num_columns']}
-
-## Provenance
-
-**Source File:** `{metadata['provenance']['source_file']}`  
-**Working Dataset:** {metadata['provenance']['working_dataset_type']}
-
-"""
-
-        # Add transformations if any
-        if metadata['provenance'].get('transformations_applied'):
-            readme += "\n### Transformations Applied\n\n"
-            for transform in metadata['provenance']['transformations_applied']:
-                readme += f"- {transform}\n"
-
-        # Add label distribution
-        readme += "\n## Label Distribution\n\n"
-        readme += "| Label | Count | Percentage |\n"
-        readme += "|-------|-------|------------|\n"
-
-        for label, info in metadata['label_distribution'].items():
-            readme += f"| {label} | {info['count']} | {info['percentage']:.1f}% |\n"
-
-        # Add quality metrics if available
-        if metadata.get('quality_metrics'):
-            qm = metadata['quality_metrics']
-            readme += f"\n## Quality Metrics\n\n"
-            readme += f"- **Consistency Mean:** {qm['consistency_mean']:.3f}\n"
-            readme += f"- **Consistency Median:** {qm['consistency_median']:.3f}\n"
-            readme += f"- **Rerank Mean:** {qm['rerank_mean']:.3f}\n"
-            readme += f"- **Rerank Median:** {qm['rerank_median']:.3f}\n"
-            readme += f"- **Scored Passages:** {qm['scored_passages']}\n"
-
-        # Add usage instructions
-        readme += f"\n## Usage\n\n"
-        readme += f"### Loading in Python\n\n"
-        readme += f"```python\n"
-        readme += f"import pandas as pd\n\n"
-        readme += f"df = pd.read_excel('data.xlsx')\n"
-        readme += f"```\n\n"
-        readme += f"### Using in HRAF Tool\n\n"
-        readme += f"1. Go to **Train Model** page\n"
-        readme += f"2. Select this experiment directory\n"
-        readme += f"3. File: `data.xlsx`\n\n"
-        readme += f"### Metadata\n\n"
-        readme += f"Full metadata available in `metadata.json`\n"
-
-        return readme
-
-    def _generate_tier_readme(self, name: str, metadata: Dict) -> str:
-        """Generate README for tiered experiment"""
-
-        tier_info = metadata['tiers']
-
-        readme = f"""# Tiered Training Experiment: {name}
-
-        **Created:** {metadata['created_at']}  
-        **Type:** Quality-Based Tiered Training Data
-
-        ## Overview
-
-        This experiment contains quality-stratified training data for curriculum learning.
-
-        ### Tier Statistics
-
-        | Tier | Count | Percentage | Purpose |
-        |------|-------|------------|---------|
-        | Tier 1 (Elite) | {tier_info['tier1']['count']:,} | {tier_info['tier1']['percentage']:.1f}% | Initial training |
-        | Tier 2 (Expansion) | {tier_info['tier2']['count']:,} | {tier_info['tier2']['percentage']:.1f}% | Generalization |
-        | Inference (Test) | {tier_info['inference']['count']:,} | {tier_info['inference']['percentage']:.1f}% | Evaluation |
-        | **Combined** | {tier_info['combined']['count']:,} | - | Full training |
-
-        ## Files
-
-        - **`tier1.xlsx`** - {tier_info['tier1']['count']} highest quality passages
-        - **`tier2.xlsx`** - {tier_info['tier2']['count']} good quality passages  
-        - **`tier1_tier2_combined.xlsx`** - {tier_info['combined']['count']} combined training data
-        - **`inference.xlsx`** - {tier_info['inference']['count']} test/validation data
-        - **`metadata.json`** - Complete experiment metadata
-        - **`README.md`** - This file
-
-        ## Provenance
-
-        **Source:** `{metadata['source']['original_file']}`  
-        **Dataset Type:** {metadata['source']['working_dataset']}  
-        **Quality Scores:** {'Yes' if metadata['quality_scores_used'] else 'No'}
-
-        ## Training Strategies
-
-        ### Strategy 1: Curriculum Learning (Recommended)Stage 1 (Epochs 1-5): Train on tier1.xlsx
-        └─ Learn from highest quality examplesStage 2 (Epochs 6-10): Fine-tune on tier1_tier2_combined.xlsx
-        └─ Generalize to broader patternsStage 3: Evaluate on inference.xlsx
-        └─ Final model testing
-
-        ### Strategy 2: Single-Pass TrainingTrain on tier1_tier2_combined.xlsx for full epochs
-        └─ Use all training data from start
-
-        ### Strategy 3: Elite-Only TrainingTrain on tier1.xlsx only
-        └─ Maximum quality, smaller dataset
-
-        ## Label Distribution
-
-        """
-
-        # Add label distribution (would need to be calculated)
-        readme += "\nSee `metadata.json` for detailed label distribution per tier.\n"
-
-        readme += f"""
-            ## Usage in HRAF Tool
-
-            ### Loading for Training
-
-            1. Navigate to **Train Model** page
-            2. Under "Dataset Selection", choose **Tiered Datasets**
-            3. Select training strategy:
-               - **Tier 1 Only** → Use `tier1.xlsx`
-               - **Tier 1 + Tier 2** → Use `tier1_tier2_combined.xlsx`
-               - **Curriculum** → Train on tier1 first, then combined
-
-            ### Configuration
-
-            Tier configuration used to create this dataset is in `metadata.json` under `tier_configuration`.
-
-            ## Quality Thresholds
-
-            This experiment was created with the following quality criteria:
-
-            """
-
-        # Add tier config if available
-        if 'tier_configuration' in metadata:
-            tier_config = metadata['tier_configuration']
-            if 'tiers' in tier_config:
-                for tier_name, tier_data in tier_config['tiers'].items():
-                    if 'quality' in tier_data:
-                        q = tier_data['quality']
-                        readme += f"\n### {tier_name.title()}\n"
-                        readme += f"- Consistency: {q['consistency_mean']:.3f}\n"
-                        readme += f"- Rerank: {q['rerank_mean']:.3f}\n"
-
-        return readme
-
-    def list_experiments(self) -> List[Dict]:
-        """List all experiments with metadata"""
-        experiments = []
-
-        if not self.base_dir.exists():
-            return experiments
-
-        for exp_dir in sorted(self.base_dir.iterdir(), reverse=True):
-            if exp_dir.is_dir():
-                meta_path = exp_dir / "metadata.json"
-                if meta_path.exists():
-                    try:
-                        with open(meta_path, 'r') as f:
-                            metadata = json.load(f)
-
-                        experiments.append({
-                            'directory': exp_dir,
-                            'name': exp_dir.name,
-                            'metadata': metadata
-                        })
-                    except:
-                        pass
-
-        return experiments
-
-    def _sanitize_name(self, name: str) -> str:
-        """Sanitize experiment name for filesystem"""
-        import re
-        safe = re.sub(r'[^\w\-_\.]', '_', name)
-        safe = re.sub(r'_+', '_', safe)
-        return safe.strip('_')[:50]  # Limit length
-
-
-# Update save functions to use DataExperiment
-def save_to_data_directory(df: pd.DataFrame, name: str, session_state: Dict, experiment_type: str = 'custom'):
-    """Save dataframe as data experiment"""
-
-    experiment = DataExperiment()
-
-    # Gather metadata
-    metadata = {
-        'name': name,
-        'experiment_type': experiment_type,
-        'transformations': session_state.get('applied_transformations', []),
-        'configuration': session_state.get('segment_filters', {})
-    }
-
-    try:
-        exp_dir = experiment.create_experiment(
-            name=name,
-            df=df,
-            experiment_type=experiment_type,
-            metadata=metadata,
-            session_state=session_state
-        )
-
-        # FIX: Resolve to absolute path before displaying
-        exp_dir_abs = exp_dir.resolve()
-
-        # Try to get relative path, but fall back to absolute if it fails
-        try:
-            display_path = exp_dir_abs.relative_to(Path.cwd().resolve())
-        except ValueError:
-            # If not in subpath, just show the full path
-            display_path = exp_dir_abs
-
-        st.success(f"✅ Experiment created: `{exp_dir.name}`")
-        st.info(f"""
-        📁 **Experiment Directory:** `{display_path}`
-
-        **Files created:**
-        - `data.xlsx` - Dataset
-        - `metadata.json` - Full metadata with lineage
-        - `README.md` - Human-readable documentation
-
-        💡 This experiment is now available for:
-        - Training models (Train Model page)
-        - Computing scores (Compute Scores page)
-        - Further data preparation
-        """)
-
-        # Add to session state for tracking
-        if 'data_experiments' not in session_state:
-            session_state['data_experiments'] = []
-
-        session_state['data_experiments'].append({
-            'name': name,
-            'path': str(exp_dir_abs),
-            'created_at': datetime.now().isoformat()
-        })
-
-    except Exception as e:
-        st.error(f"Error creating experiment: {e}")
-        import traceback
-        with st.expander("Error details"):
-            st.code(traceback.format_exc())
-
-def save_tiers_to_data_directory(
-        tier1: pd.DataFrame,
-        tier2: pd.DataFrame,
-        inference: pd.DataFrame,
-        name: str,
-        session_state: Dict
-):
-    """Save tiers as data experiment"""
-
-    experiment = DataExperiment()
-
-    # Get tier metadata from session
-    tier_metadata = session_state.get('tier_metadata', {})
-
-    try:
-        exp_dir = experiment.create_tier_experiment(
-            name=name,
-            tier1=tier1,
-            tier2=tier2,
-            inference=inference,
-            tier_metadata=tier_metadata,
-            session_state=session_state
-        )
-
-        # FIX: Resolve to absolute path before displaying
-        exp_dir_abs = exp_dir.resolve()
-
-        # Try to get relative path, but fall back to absolute if it fails
-        try:
-            display_path = exp_dir_abs.relative_to(Path.cwd().resolve())
-        except ValueError:
-            # If not in subpath, just show the full path
-            display_path = exp_dir_abs
-
-        st.success(f"✅ Tier experiment created: `{exp_dir.name}`")
-        st.info(f"""
-        📁 **Experiment Directory:** `{display_path}`
-
-        **Files created:**
-        - `tier1.xlsx` ({len(tier1)} passages)
-        - `tier2.xlsx` ({len(tier2)} passages)
-        - `inference.xlsx` ({len(inference)} passages)
-        - `tier1_tier2_combined.xlsx` ({len(tier1) + len(tier2)} passages)
-        - `metadata.json` - Complete tier configuration
-        - `README.md` - Training strategies and usage
-
-        💡 Use these files in Train Model page with different strategies
-        """)
-
-        # Add to session state
-        if 'data_experiments' not in session_state:
-            session_state['data_experiments'] = []
-
-        session_state['data_experiments'].append({
-            'name': name,
-            'path': str(exp_dir_abs),
-            'type': 'tiered',
-            'created_at': datetime.now().isoformat()
-        })
-
-    except Exception as e:
-        st.error(f"Error creating tier experiment: {e}")
-        import traceback
-        with st.expander("Error details"):
-            st.code(traceback.format_exc())
-
-
-def create_training_package(session_state: Dict, name: str):
-    """Create complete training package with README"""
-
-    import zipfile
-
-    tier1 = session_state['tier1_dataset']
-    tier2 = session_state['tier2_dataset']
-    inference = session_state['inference_dataset']
-    label_columns = session_state.get('label_columns', [])
-
-    zip_buffer = io.BytesIO()
-
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        # Save datasets
-        for tier_name, tier_df in [('tier1', tier1), ('tier2', tier2), ('inference', inference)]:
-            excel_buffer = io.BytesIO()
-            tier_df.to_excel(excel_buffer, index=False)
-            zip_file.writestr(f'datasets/{name}_{tier_name}.xlsx', excel_buffer.getvalue())
-
-        # Combined training set
-        combined = pd.concat([tier1, tier2])
-        combined_buffer = io.BytesIO()
-        combined.to_excel(combined_buffer, index=False)
-        zip_file.writestr(f'datasets/{name}_tier1_tier2_combined.xlsx', combined_buffer.getvalue())
-
-        # Metadata
-        metadata = {
-            'created_at': datetime.now().isoformat(),
-            'tier1_count': len(tier1),
-            'tier2_count': len(tier2),
-            'inference_count': len(inference),
-            'label_columns': label_columns
-        }
-        zip_file.writestr('metadata.json', json.dumps(metadata, indent=2))
-
-        # README
-        readme = f"""# HRAF Training Package: {name}
-
-Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-## Contents
-
-### Datasets
-- `tier1.xlsx` - {len(tier1)} elite training passages (highest quality)
-- `tier2.xlsx` - {len(tier2)} expansion passages (good quality)
-- `tier1_tier2_combined.xlsx` - {len(combined)} combined training passages
-- `inference.xlsx` - {len(inference)} test/validation passages
-
-### Training Protocol
-
-1. **Stage 1: Foundation** (Epochs 1-5)
-   - Use: tier1.xlsx
-   - Learn from highest quality examples
-
-2. **Stage 2: Expansion** (Epochs 6-10)
-   - Use: tier1_tier2_combined.xlsx
-   - Generalize to broader patterns
-
-3. **Stage 3: Evaluation**
-   - Use: inference.xlsx
-   - Final model testing
-
-### Label Columns
-{chr(10).join('- ' + label for label in label_columns)}
-
-## Usage
-
-Load any dataset file on the Train Model page to begin training.
-"""
-        zip_file.writestr('README.md', readme)
-
-    st.download_button(
-        label="📥 Download Training Package",
-        data=zip_buffer.getvalue(),
-        file_name=f"{name}.zip",
-        mime="application/zip"
-    )
-

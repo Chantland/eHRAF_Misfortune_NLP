@@ -7,7 +7,7 @@ Handles saving/loading of:
 - Auto-detection of existing caches
 - Checkpoint system for long operations
 """
-
+import streamlit as st
 import json
 import pandas as pd
 from pathlib import Path
@@ -23,47 +23,20 @@ class CacheManager:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # ========================================================================
-    # EMBEDDINGS CACHE
-    # ========================================================================
+        # Setup fallback cache directory
+        self.fallback_cache_dir = Path(cache_dir.replace("data", "_data"))
 
-    def save_embeddings(self, namespace: str, passage_id_map: Dict[int, str]) -> Path:
+    def load_embeddings(self, namespace: str) -> Optional[Dict[str, str]]:
         """
-        Save passage_id_map to disk
-
-        Args:
-            namespace: Unique identifier for this dataset
-            passage_id_map: Dict mapping df indices to Pinecone IDs
-
-        Returns:
-            Path to saved file
+        Load stable_id -> pinecone_id mapping from disk
+        Checks both primary and fallback locations
         """
+        # Try primary first
         cache_file = self.cache_dir / f"{namespace}_embeddings.json"
 
-        # Convert int keys to strings for JSON
-        serializable_map = {str(k): v for k, v in passage_id_map.items()}
-
-        with open(cache_file, 'w') as f:
-            json.dump({
-                'namespace': namespace,
-                'created_at': datetime.now().isoformat(),
-                'num_passages': len(passage_id_map),
-                'passage_id_map': serializable_map
-            }, f, indent=2)
-
-        return cache_file
-
-    def load_embeddings(self, namespace: str) -> Optional[Dict[int, str]]:
-        """
-        Load passage_id_map from disk
-
-        Args:
-            namespace: Unique identifier for this dataset
-
-        Returns:
-            Dict mapping df indices to Pinecone IDs, or None if not found
-        """
-        cache_file = self.cache_dir / f"{namespace}_embeddings.json"
+        # Fall back to _data if not found
+        if not cache_file.exists() and self.fallback_cache_dir.exists():
+            cache_file = self.fallback_cache_dir / f"{namespace}_embeddings.json"
 
         if not cache_file.exists():
             return None
@@ -72,18 +45,55 @@ class CacheManager:
             with open(cache_file, 'r') as f:
                 data = json.load(f)
 
-            # Convert string keys back to ints
-            passage_id_map = {int(k): v for k, v in data['passage_id_map'].items()}
+            format_version = data.get('format_version', '1.0')
 
-            return passage_id_map
+            if format_version == '1.0':
+                st.warning(f"⚠️ Found old embedding cache format for {namespace}")
+                st.error("❌ Old cache uses DataFrame indices (broken)")
+                st.info("💡 Delete this cache and re-generate embeddings with updated code")
+                return None
+
+            stable_id_map = data.get('stable_id_map', {})
+            return stable_id_map
+
         except Exception as e:
             print(f"Error loading embeddings cache: {e}")
             return None
 
     def has_embeddings(self, namespace: str) -> bool:
-        """Check if embeddings cache exists"""
+        """Check if embeddings cache exists (in either location)"""
+        primary = self.cache_dir / f"{namespace}_embeddings.json"
+        fallback = self.fallback_cache_dir / f"{namespace}_embeddings.json"
+        return primary.exists() or (self.fallback_cache_dir.exists() and fallback.exists())
+
+    # ========================================================================
+    # EMBEDDINGS CACHE
+    # ========================================================================
+
+    def save_embeddings(self, namespace: str, stable_id_map: Dict[str, str]) -> Path:
+        """
+        Save stable_id -> pinecone_id mapping to disk
+
+        Args:
+            namespace: Unique identifier for this dataset
+            stable_id_map: Dict mapping stable_id -> pinecone_id
+
+        Returns:
+            Path to saved file
+        """
         cache_file = self.cache_dir / f"{namespace}_embeddings.json"
-        return cache_file.exists()
+
+        # All keys are already strings (stable_ids are hex strings)
+        with open(cache_file, 'w') as f:
+            json.dump({
+                'namespace': namespace,
+                'created_at': datetime.now().isoformat(),
+                'num_passages': len(stable_id_map),
+                'stable_id_map': stable_id_map,  # Changed from passage_id_map
+                'format_version': '2.0',  # Mark as new format
+            }, f, indent=2)
+
+        return cache_file
 
     # ========================================================================
     # SCORES CACHE
@@ -114,14 +124,14 @@ class CacheManager:
     def load_scores(self, namespace: str) -> Optional[pd.DataFrame]:
         """
         Load quality scores from disk
-
-        Args:
-            namespace: Unique identifier for this dataset
-
-        Returns:
-            DataFrame with quality scores, or None if not found
+        Checks both primary and fallback locations
         """
+        # Try primary first
         cache_file = self.cache_dir / f"{namespace}_scores.parquet"
+
+        # Fall back to _data if not found
+        if not cache_file.exists() and self.fallback_cache_dir.exists():
+            cache_file = self.fallback_cache_dir / f"{namespace}_scores.parquet"
 
         if not cache_file.exists():
             return None
@@ -133,131 +143,9 @@ class CacheManager:
             return None
 
     def has_scores(self, namespace: str) -> bool:
-        """Check if scores cache exists"""
-        cache_file = self.cache_dir / f"{namespace}_scores.parquet"
-        return cache_file.exists()
+        """Check if scores cache exists (in either location)"""
+        primary = self.cache_dir / f"{namespace}_scores.parquet"
+        fallback = self.fallback_cache_dir / f"{namespace}_scores.parquet"
+        return primary.exists() or (self.fallback_cache_dir.exists() and fallback.exists())
 
-    # ========================================================================
-    # CHECKPOINT SYSTEM
-    # ========================================================================
 
-    def save_checkpoint(
-        self,
-        namespace: str,
-        checkpoint_type: str,
-        data: Dict
-    ) -> Path:
-        """
-        Save a checkpoint during long operations
-
-        Args:
-            namespace: Dataset namespace
-            checkpoint_type: Type of checkpoint (e.g., 'embedding', 'scoring')
-            data: Checkpoint data
-
-        Returns:
-            Path to checkpoint file
-        """
-        checkpoint_file = self.cache_dir / f"{namespace}_{checkpoint_type}_checkpoint.json"
-
-        with open(checkpoint_file, 'w') as f:
-            json.dump({
-                'namespace': namespace,
-                'type': checkpoint_type,
-                'timestamp': datetime.now().isoformat(),
-                **data
-            }, f, indent=2)
-
-        return checkpoint_file
-
-    def load_checkpoint(
-        self,
-        namespace: str,
-        checkpoint_type: str
-    ) -> Optional[Dict]:
-        """Load a checkpoint"""
-        checkpoint_file = self.cache_dir / f"{namespace}_{checkpoint_type}_checkpoint.json"
-
-        if not checkpoint_file.exists():
-            return None
-
-        try:
-            with open(checkpoint_file, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Error loading checkpoint: {e}")
-            return None
-
-    def clear_checkpoint(self, namespace: str, checkpoint_type: str):
-        """Clear a checkpoint after successful completion"""
-        checkpoint_file = self.cache_dir / f"{namespace}_{checkpoint_type}_checkpoint.json"
-
-        if checkpoint_file.exists():
-            checkpoint_file.unlink()
-
-    # ========================================================================
-    # CACHE MANAGEMENT
-    # ========================================================================
-
-    def list_caches(self) -> List[Dict]:
-        """List all cached datasets"""
-        caches = []
-
-        # Find all embeddings files
-        for emb_file in self.cache_dir.glob("*_embeddings.json"):
-            namespace = emb_file.stem.replace('_embeddings', '')
-
-            cache_info = {
-                'namespace': namespace,
-                'has_embeddings': True,
-                'has_scores': self.has_scores(namespace)
-            }
-
-            # Get metadata from embeddings file
-            try:
-                with open(emb_file, 'r') as f:
-                    data = json.load(f)
-                    cache_info['created_at'] = data.get('created_at')
-                    cache_info['num_passages'] = data.get('num_passages')
-            except:
-                pass
-
-            caches.append(cache_info)
-
-        return caches
-
-    def clear_cache(self, namespace: str):
-        """Clear all caches for a namespace"""
-        patterns = [
-            f"{namespace}_embeddings.json",
-            f"{namespace}_scores.parquet",
-            f"{namespace}_*_checkpoint.json"
-        ]
-
-        for pattern in patterns:
-            for file in self.cache_dir.glob(pattern):
-                file.unlink()
-
-    def get_cache_size(self, namespace: str) -> int:
-        """Get total size of caches for a namespace in bytes"""
-        total_size = 0
-
-        patterns = [
-            f"{namespace}_embeddings.json",
-            f"{namespace}_scores.parquet"
-        ]
-
-        for pattern in patterns:
-            for file in self.cache_dir.glob(pattern):
-                total_size += file.stat().st_size
-
-        return total_size
-
-    def cleanup_old_caches(self, days: int = 30):
-        """Remove caches older than specified days"""
-        cutoff = datetime.now().timestamp() - (days * 86400)
-
-        for file in self.cache_dir.glob("*"):
-            if file.stat().st_mtime < cutoff:
-                file.unlink()
-                print(f"Removed old cache: {file.name}")

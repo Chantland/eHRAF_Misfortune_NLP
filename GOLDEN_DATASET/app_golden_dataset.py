@@ -1,12 +1,5 @@
 """
-HRAF Golden Dataset Discovery - Main Application
-Refactored for clarity, modularity, and better UX
-
-Architecture:
-- Main app handles navigation and global chat
-- Pages are modular and self-contained
-- Chat assistant available on all pages with full context
-- Clean separation of concerns
+to run: streamlit run app_golden_dataset.py
 """
 
 import streamlit as st
@@ -52,12 +45,12 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Navigation
+    # Navigation - ADD ANALYSIS
     st.markdown("### 📍 Navigation")
 
     page = st.radio(
         "Go to:",
-        ["📊 Data", "🤖 Models", "🔍 Discover"],
+        ["📊 Data", "🔬 Analysis", "🤖 Models", "🔍 Discover"],  # ADDED ANALYSIS
         key="main_navigation",
         label_visibility="collapsed"
     )
@@ -112,9 +105,13 @@ if show_chat:
 # PAGE ROUTING
 # ============================================================================
 
-# Route to appropriate page
+# Update routing section - ADD ANALYSIS CASE
 if page == "📊 Data":
     data_page.render()
+
+elif page == "🔬 Analysis":  # NEW
+    from page_views import analysis_page
+    analysis_page.render()
 
 elif page == "🤖 Models":
     models_page.render()

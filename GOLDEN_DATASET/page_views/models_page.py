@@ -261,6 +261,7 @@ def render_evaluation_section(manager: ModelManager):
 
             # Calculate per-label metrics
             from sklearn.metrics import f1_score, precision_score, recall_score
+            import numpy as np
 
             metrics_data = []
             for label in label_columns:
@@ -286,32 +287,46 @@ def render_evaluation_section(manager: ModelManager):
             st.dataframe(
                 pd.DataFrame(metrics_data),
                 hide_index=True,
-                width='stretch'
+                use_container_width=True
             )
 
-            # Overall metrics
+            # Overall metrics - FIXED FOR MULTI-LABEL
             col1, col2, col3 = st.columns(3)
 
-            # Calculate overall
-            all_actual = []
-            all_pred = []
-            for label in label_columns:
-                if label in actual_labels:
-                    all_actual.extend(actual_labels[label])
-                    all_pred.extend(predicted[label])
+            # Stack predictions into proper multi-label format (n_samples × n_labels)
+            y_true = np.array([actual_labels[label] for label in label_columns if label in actual_labels]).T
+            y_pred = np.array([predicted[label] for label in label_columns if label in actual_labels]).T
 
-            overall_f1 = f1_score(all_actual, all_pred, zero_division=0)
-            overall_precision = precision_score(all_actual, all_pred, zero_division=0)
-            overall_recall = recall_score(all_actual, all_pred, zero_division=0)
+            # Calculate micro-averaged metrics (treats each label prediction equally)
+            overall_f1 = f1_score(y_true, y_pred, average='micro', zero_division=0)
+            overall_precision = precision_score(y_true, y_pred, average='micro', zero_division=0)
+            overall_recall = recall_score(y_true, y_pred, average='micro', zero_division=0)
 
             with col1:
-                st.metric("Overall F1", f"{overall_f1:.3f}")
+                st.metric("F1 Micro", f"{overall_f1:.3f}")
 
             with col2:
-                st.metric("Overall Precision", f"{overall_precision:.3f}")
+                st.metric("Precision Micro", f"{overall_precision:.3f}")
 
             with col3:
-                st.metric("Overall Recall", f"{overall_recall:.3f}")
+                st.metric("Recall Micro", f"{overall_recall:.3f}")
+
+            # Also show macro for comparison
+            st.caption("---")
+            col1, col2, col3 = st.columns(3)
+
+            macro_f1 = f1_score(y_true, y_pred, average='macro', zero_division=0)
+            macro_precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
+            macro_recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
+
+            with col1:
+                st.metric("F1 Macro", f"{macro_f1:.3f}")
+
+            with col2:
+                st.metric("Precision Macro", f"{macro_precision:.3f}")
+
+            with col3:
+                st.metric("Recall Macro", f"{macro_recall:.3f}")
 
 
 # ============================================================================
@@ -513,7 +528,7 @@ def render_comparison_section(manager: ModelManager):
                     return [''] * len(row)
 
             styled_df = comparison_df.style.apply(highlight_winner, axis=1)
-            st.dataframe(styled_df, hide_index=True, use_container_width=True)
+            st.dataframe(styled_df, hide_index=True, width='stretch')
 
             # Win/loss breakdown
             st.markdown("---")
