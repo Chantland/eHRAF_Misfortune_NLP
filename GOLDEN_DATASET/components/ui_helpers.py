@@ -399,6 +399,174 @@ def show_tooltip(text: str, icon: str = "ℹ️") -> None:
     )
 
 
+# ============================================================================
+# INLINE HELP SYSTEM
+# ============================================================================
+
+HELP_TOPICS = {
+    'pipeline': {
+        'title': 'Data Pipeline',
+        'content': """
+        The data pipeline transforms raw data into training-ready datasets:
+
+        1. **RAW** - Original data as uploaded
+        2. **CLEANED** - Validated and cleaned (remove duplicates, short passages)
+        3. **EMBEDDED** - Semantic embeddings generated via Voyage AI
+        4. **SCORED** - Quality scores calculated (consistency, rerank)
+        5. **TIERED** - Split into training tiers by quality
+        """
+    },
+    'tiers': {
+        'title': 'Training Tiers',
+        'content': """
+        Tiers organize data by quality for training:
+
+        - **Tier 1 (Elite)**: Highest quality passages for initial training
+        - **Tier 2 (Expansion)**: Good quality for expanding training
+        - **Inference**: Held-out data for testing
+
+        Higher quality data leads to better model performance.
+        """
+    },
+    'labels': {
+        'title': 'Label Categories',
+        'content': """
+        Labels are organized into categories:
+
+        - **EVENT**: What happened (Illness, Accident, Other)
+        - **CAUSE**: Why it happened (Spirits/Gods, Witchcraft, etc.)
+        - **ACTION**: What was done (Shaman, Priest, Divination, etc.)
+
+        Multi-label classification means passages can have multiple labels.
+        """
+    },
+    'embeddings': {
+        'title': 'Embeddings',
+        'content': """
+        Embeddings are numerical representations of text meaning.
+
+        We use Voyage AI to generate embeddings that capture semantic similarity.
+        Similar passages have similar embeddings, enabling quality scoring.
+        """
+    },
+    'scores': {
+        'title': 'Quality Scores',
+        'content': """
+        Quality scores measure label reliability:
+
+        - **Consistency**: Do similar passages have similar labels?
+        - **Rerank**: How relevant is the passage to its labels?
+
+        Higher scores = more reliable training examples.
+        """
+    },
+    'training': {
+        'title': 'Model Training',
+        'content': """
+        Training creates a classifier from your labeled data:
+
+        1. Select training data (tiers)
+        2. Configure model architecture
+        3. Run training (may take 10-60 minutes)
+        4. Evaluate on held-out test data
+
+        Target: F1 Micro > 0.72
+        """
+    }
+}
+
+
+def render_inline_help(topic: str, expanded: bool = False):
+    """
+    Render inline help for a topic
+
+    Args:
+        topic: Help topic key
+        expanded: Whether to show expanded by default
+    """
+    if topic not in HELP_TOPICS:
+        return
+
+    help_data = HELP_TOPICS[topic]
+
+    with st.expander(f"ℹ️ {help_data['title']}", expanded=expanded):
+        st.markdown(help_data['content'])
+
+
+def render_quick_help(topic: str):
+    """Show a brief help tooltip"""
+    if topic not in HELP_TOPICS:
+        return
+
+    help_data = HELP_TOPICS[topic]
+    # Extract first sentence
+    first_line = help_data['content'].strip().split('\n')[0]
+    st.caption(f"ℹ️ {first_line}")
+
+
+def show_contextual_error(error: Exception, context: str = ""):
+    """
+    Show error with helpful context and suggestions
+
+    Args:
+        error: The exception
+        context: What was being attempted
+    """
+    error_str = str(error).lower()
+
+    # Common error patterns and helpful messages
+    suggestions = []
+
+    if 'api' in error_str or 'key' in error_str:
+        suggestions.append("Check your API keys in the .env file")
+        suggestions.append("Make sure VOYAGE_API_KEY and PINECONE_API_KEY are set")
+
+    if 'connection' in error_str or 'timeout' in error_str:
+        suggestions.append("Check your internet connection")
+        suggestions.append("The API service may be temporarily unavailable")
+
+    if 'memory' in error_str or 'oom' in error_str:
+        suggestions.append("Try reducing batch size")
+        suggestions.append("Close other applications to free memory")
+
+    if 'file' in error_str or 'path' in error_str:
+        suggestions.append("Check that the file exists and is readable")
+        suggestions.append("Make sure the file format is correct")
+
+    if 'column' in error_str:
+        suggestions.append("Check that column names match your data")
+        suggestions.append("Use the 'Customize Configuration' option")
+
+    # Display error
+    if context:
+        st.error(f"❌ Error {context}: {error}")
+    else:
+        st.error(f"❌ Error: {error}")
+
+    # Show suggestions
+    if suggestions:
+        st.markdown("**💡 Suggestions:**")
+        for suggestion in suggestions:
+            st.markdown(f"- {suggestion}")
+
+    # Expandable details
+    with st.expander("🔍 Technical Details"):
+        import traceback
+        st.code(traceback.format_exc())
+
+
+def show_action_required(message: str, action: str):
+    """
+    Show a message indicating user action is required
+
+    Args:
+        message: What needs to happen
+        action: How to do it
+    """
+    st.warning(f"⚠️ {message}")
+    st.info(f"👉 **Action:** {action}")
+
+
 def render_file_browser(
         base_dir: Path,
         file_types: List[str] = ['.xlsx'],
