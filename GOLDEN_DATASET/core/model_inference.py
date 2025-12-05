@@ -35,6 +35,7 @@ class ConfigurableHierarchicalConfig(PretrainedConfig):
         use_focal_loss=True,
         focal_gamma=2.5,
         teacher_forcing_ratio=0.7,
+        predict_main_labels=True,  # Control whether to predict main category labels
         num_main_labels=3,
         num_event_labels=2,
         num_cause_labels=4,
@@ -58,6 +59,7 @@ class ConfigurableHierarchicalConfig(PretrainedConfig):
         self.use_focal_loss = use_focal_loss
         self.focal_gamma = focal_gamma
         self.teacher_forcing_ratio = teacher_forcing_ratio
+        self.predict_main_labels = predict_main_labels
         self.num_main_labels = num_main_labels
         self.num_event_labels = num_event_labels
         self.num_cause_labels = num_cause_labels
@@ -81,11 +83,19 @@ class ConfigurableHierarchicalModel(PreTrainedModel):
         if hasattr(config, 'attention_dropout') and config.attention_dropout > 0:
             self.encoder.config.attention_probs_dropout_prob = config.attention_dropout
 
-        self.main_classifier = nn.Linear(config.hidden_size, config.num_main_labels)
+        # Main classifiers (ONLY if predict_main_labels is True and num_main_labels > 0)
+        predict_main = getattr(config, 'predict_main_labels', True)
+        if predict_main and config.num_main_labels > 0:
+            self.main_classifier = nn.Linear(config.hidden_size, config.num_main_labels)
+        else:
+            self.main_classifier = None
 
-        if config.use_hierarchy:
+        # Build sublabel classifiers based on configuration
+        if config.use_hierarchy and predict_main and config.num_main_labels > 0:
+            # Hierarchical: sublabels depend on main labels
             hierarchical_input_size = config.hidden_size + config.num_main_labels
         else:
+            # Non-hierarchical or no main labels: sublabels independent
             hierarchical_input_size = config.hidden_size
 
         self.event_classifier = self._build_sublabel_classifier(
@@ -104,6 +114,7 @@ class ConfigurableHierarchicalModel(PreTrainedModel):
         self.use_hierarchy = config.use_hierarchy
         self.gated_hierarchy = config.gated_hierarchy
         self.gate_threshold = config.gate_threshold
+        self.predict_main_labels = predict_main
         self.post_init()
 
     def _build_sublabel_classifier(self, input_size, output_size, hidden_size, num_layers, dropout):
@@ -121,71 +132,60 @@ class ConfigurableHierarchicalModel(PreTrainedModel):
         return nn.Sequential(*layers)
 
     def forward(
-            self,
-            input_ids=None,
-            attention_mask=None,
-            labels=None,
-            teacher_forcing=False,
-            return_dict=None,
-            **kwargs
+        self,
+        input_ids=None,
+        attention_mask=None,
+        labels=None,
+        teacher_forcing=False,
+        return_dict=None,
+        **kwargs
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         encoder_outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
         pooled_output = encoder_outputs.last_hidden_state[:, 0]
-        main_logits = self.main_classifier(pooled_output)
 
-        if self.use_hierarchy:
-            if teacher_forcing and labels is not None:
-                main_probs = labels[:, :self.config.num_main_labels].float()
+        # Get main predictions (only if main_classifier exists)
+        if self.main_classifier is not None:
+            main_logits = self.main_classifier(pooled_output)
+
+            if self.use_hierarchy:
+                # Use main predictions for sublabel input
+                if teacher_forcing and labels is not None:
+                    main_probs = labels[:, :self.config.num_main_labels].float()
+                else:
+                    main_probs = torch.sigmoid(main_logits)
+                hierarchical_input = torch.cat([pooled_output, main_probs], dim=1)
             else:
-                main_probs = torch.sigmoid(main_logits)
-            hierarchical_input = torch.cat([pooled_output, main_probs], dim=1)
+                # Non-hierarchical: use only pooled output
+                hierarchical_input = pooled_output
         else:
+            # No main labels - use pooled output directly
+            main_logits = torch.zeros(pooled_output.shape[0], 0).to(pooled_output.device)
             hierarchical_input = pooled_output
 
-        event_logits = self.event_classifier(hierarchical_input) if self.event_classifier else torch.zeros(
-            main_logits.shape[0], 0).to(main_logits.device)
-        cause_logits = self.cause_classifier(hierarchical_input) if self.cause_classifier else torch.zeros(
-            main_logits.shape[0], 0).to(main_logits.device)
-        action_logits = self.action_classifier(hierarchical_input) if self.action_classifier else torch.zeros(
-            main_logits.shape[0], 0).to(main_logits.device)
+        # Get sublabel predictions
+        event_logits = self.event_classifier(hierarchical_input) if self.event_classifier else torch.zeros(pooled_output.shape[0], 0).to(pooled_output.device)
+        cause_logits = self.cause_classifier(hierarchical_input) if self.cause_classifier else torch.zeros(pooled_output.shape[0], 0).to(pooled_output.device)
+        action_logits = self.action_classifier(hierarchical_input) if self.action_classifier else torch.zeros(pooled_output.shape[0], 0).to(pooled_output.device)
 
-        # ✅ FIX: Only gate if we have main labels AND sublabels
-        if self.gated_hierarchy and self.use_hierarchy and self.config.num_main_labels > 0:
+        # Apply gating if configured (only if we have main labels)
+        if self.gated_hierarchy and self.use_hierarchy and self.main_classifier is not None:
             main_probs = torch.sigmoid(main_logits)
-
-            # Gate EVENT sublabels (only if we have both main and sublabels)
-            if event_logits.shape[1] > 0 and main_probs.shape[1] > 0:
-                event_gate = torch.where(
-                    main_probs[:, 0:1] > self.gate_threshold,
-                    torch.ones_like(main_probs[:, 0:1]),
-                    torch.zeros_like(main_probs[:, 0:1])
-                )
-                # Broadcast gate to match sublabel dimensions
-                event_gate = event_gate.expand(-1, event_logits.shape[1])
+            if event_logits.shape[1] > 0:
+                event_gate = torch.where(main_probs[:, 0:1] > self.gate_threshold, torch.ones_like(main_probs[:, 0:1]), torch.zeros_like(main_probs[:, 0:1]))
                 event_logits = event_logits * event_gate
-
-            # Gate CAUSE sublabels
-            if cause_logits.shape[1] > 0 and main_probs.shape[1] > 1:
-                cause_gate = torch.where(
-                    main_probs[:, 1:2] > self.gate_threshold,
-                    torch.ones_like(main_probs[:, 1:2]),
-                    torch.zeros_like(main_probs[:, 1:2])
-                )
-                cause_gate = cause_gate.expand(-1, cause_logits.shape[1])
+            if cause_logits.shape[1] > 0:
+                cause_gate = torch.where(main_probs[:, 1:2] > self.gate_threshold, torch.ones_like(main_probs[:, 1:2]), torch.zeros_like(main_probs[:, 1:2]))
                 cause_logits = cause_logits * cause_gate
-
-            # Gate ACTION sublabels
-            if action_logits.shape[1] > 0 and main_probs.shape[1] > 2:
-                action_gate = torch.where(
-                    main_probs[:, 2:3] > self.gate_threshold,
-                    torch.ones_like(main_probs[:, 2:3]),
-                    torch.zeros_like(main_probs[:, 2:3])
-                )
-                action_gate = action_gate.expand(-1, action_logits.shape[1])
+            if action_logits.shape[1] > 0:
+                action_gate = torch.where(main_probs[:, 2:3] > self.gate_threshold, torch.ones_like(main_probs[:, 2:3]), torch.zeros_like(main_probs[:, 2:3]))
                 action_logits = action_logits * action_gate
 
-        logits = torch.cat([main_logits, event_logits, cause_logits, action_logits], dim=1)
+        # Concatenate all logits (only include main_logits if they exist)
+        if self.main_classifier is not None:
+            logits = torch.cat([main_logits, event_logits, cause_logits, action_logits], dim=1)
+        else:
+            logits = torch.cat([event_logits, cause_logits, action_logits], dim=1)
 
         loss = None
         if labels is not None:
@@ -318,6 +318,20 @@ class HRAFModelLoader:
         """
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        # Validate and clean text input
+        if text is None or (isinstance(text, float) and str(text) == 'nan'):
+            text = ""
+        text = str(text).strip()
+
+        if not text:
+            # Return empty predictions for empty text
+            label_list = self.label_names if isinstance(self.label_names, list) else []
+            return {
+                'predictions': {label: False for label in label_list},
+                'probabilities': {label: 0.0 for label in label_list},
+                'predicted_labels': []
+            }
 
         # Tokenize
         inputs = self.tokenizer(

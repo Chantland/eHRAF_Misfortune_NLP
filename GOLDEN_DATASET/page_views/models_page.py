@@ -34,34 +34,90 @@ from core.model_inference import HRAFModelLoader, find_model_directories
 def render():
     """Main render function for Models page"""
 
-    st.markdown("# 🤖 Model Management")
-    st.caption("Train, evaluate, and compare classification models")
+    st.markdown("# 🤖 Models")
 
-    # Initialize model manager - FIXED: check for None too
+    # Initialize model manager
     if 'model_manager' not in st.session_state or st.session_state.model_manager is None:
         st.session_state.model_manager = ModelManager()
 
     manager = st.session_state.model_manager
 
-    # Create tabs
-    tabs = st.tabs([
-        "📚 Model Library",
-        "🎓 Train New Model",
-        "📊 Evaluate",
-        "⚖️ Compare"
-    ])
+    # Show quick status
+    render_models_status(manager)
 
-    with tabs[0]:
-        render_model_library(manager)
+    st.markdown("---")
 
-    with tabs[1]:
+    # Simplified two-column layout for common actions
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        action = st.radio(
+            "What would you like to do?",
+            ["🎓 Train a Model", "📊 Evaluate a Model", "🔮 Batch Prediction", "📚 Manage Models"],
+            key="model_action",
+            label_visibility="collapsed"
+        )
+
+    with col2:
+        # Quick action based on selection
+        if action == "🎓 Train a Model":
+            if not st.session_state.get('initialized'):
+                st.warning("Load data first on the Data page")
+            else:
+                st.success("✅ Data loaded - ready to train")
+
+        elif action == "📊 Evaluate a Model":
+            if len(manager) == 0:
+                st.info("Load a model first")
+            else:
+                st.success(f"✅ {len(manager)} model(s) available")
+
+        elif action == "🔮 Batch Prediction":
+            if len(manager) == 0:
+                st.info("Load a model first")
+            elif not st.session_state.get('initialized'):
+                st.warning("Load data first")
+            else:
+                st.success("✅ Ready for batch prediction")
+
+        elif action == "📚 Manage Models":
+            model_dirs = find_model_directories("./models")
+            st.info(f"{len(model_dirs)} trained model(s) found")
+
+    st.markdown("---")
+
+    # Render selected section
+    if action == "🎓 Train a Model":
         render_training_section()
 
-    with tabs[2]:
+    elif action == "📊 Evaluate a Model":
         render_evaluation_section(manager)
 
-    with tabs[3]:
-        render_comparison_section(manager)
+    elif action == "🔮 Batch Prediction":
+        render_batch_prediction_section(manager)
+
+    elif action == "📚 Manage Models":
+        render_model_library(manager)
+
+
+def render_models_status(manager: ModelManager):
+    """Quick status bar for models"""
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        loaded_count = len(manager)
+        st.metric("Loaded Models", loaded_count)
+
+    with col2:
+        model_dirs = find_model_directories("./models")
+        st.metric("Available Models", len(model_dirs))
+
+    with col3:
+        if st.session_state.get('initialized'):
+            st.metric("Data Status", "✅ Ready")
+        else:
+            st.metric("Data Status", "❌ Not loaded")
 
 
 # ============================================================================
@@ -144,6 +200,278 @@ def render_model_library(manager: ModelManager):
                 if success:
                     st.success(f"✅ Model loaded!")
                     st.rerun()
+
+
+# ============================================================================
+# BATCH PREDICTION
+# ============================================================================
+
+def render_batch_prediction_section(manager: ModelManager):
+    """Run predictions on all passages and export results"""
+
+    st.markdown("### 🔮 Batch Prediction")
+
+    st.info("""
+    **Batch Prediction** runs the model on all loaded passages and exports predictions.
+
+    Use this for:
+    - New, unlabeled data you want to classify
+    - Generating predictions for analysis
+    - Exporting model outputs to Excel
+    """)
+
+    # Check prerequisites
+    if len(manager) == 0:
+        st.warning("⚠️ Load a model first")
+        st.info("Go to **Manage Models** and load a trained model")
+        return
+
+    if not st.session_state.get('initialized'):
+        st.warning("⚠️ Load data first")
+        st.info("Go to **Data** page → **🔮 Load for Prediction** tab")
+        return
+
+    df = st.session_state.df
+    passage_col = st.session_state.passage_col
+    label_columns = st.session_state.label_columns
+
+    # Show data info
+    st.markdown("#### 📊 Data Summary")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Passages", f"{len(df):,}")
+    with col2:
+        st.metric("Passage Column", passage_col)
+    with col3:
+        prediction_mode = st.session_state.get('prediction_mode', False)
+        st.metric("Mode", "Prediction" if prediction_mode else "Evaluation")
+
+    st.markdown("---")
+
+    # Model selection
+    st.markdown("#### 🤖 Select Model")
+
+    available_models = list(manager.models.keys())
+    selected_model = st.selectbox(
+        "Model to use:",
+        available_models,
+        key="batch_pred_model"
+    )
+
+    # Options
+    st.markdown("#### ⚙️ Options")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        use_optimal = st.checkbox(
+            "Use optimal thresholds",
+            value=True,
+            help="Use label-specific thresholds learned during training"
+        )
+
+    with col2:
+        include_probs = st.checkbox(
+            "Include probabilities",
+            value=True,
+            help="Include raw probability scores in output"
+        )
+
+    # Batch size for progress
+    batch_size = st.slider(
+        "Batch size (for progress updates):",
+        10, 100, 50,
+        help="Larger batches = faster, smaller = more progress updates"
+    )
+
+    st.markdown("---")
+
+    # Run prediction
+    if st.button("🚀 Run Batch Prediction", type="primary"):
+        run_batch_prediction(
+            manager=manager,
+            model_name=selected_model,
+            df=df,
+            passage_col=passage_col,
+            label_columns=label_columns,
+            use_optimal=use_optimal,
+            include_probs=include_probs,
+            batch_size=batch_size
+        )
+
+
+def run_batch_prediction(
+    manager: ModelManager,
+    model_name: str,
+    df: pd.DataFrame,
+    passage_col: str,
+    label_columns: List[str],
+    use_optimal: bool,
+    include_probs: bool,
+    batch_size: int
+):
+    """Execute batch prediction and show results"""
+
+    loader = manager.get_model(model_name)
+
+    if loader is None:
+        st.error("❌ Could not load model")
+        return
+
+    passages = df[passage_col].tolist()
+    total = len(passages)
+
+    # Progress tracking
+    progress_bar = st.progress(0, text="Starting predictions...")
+    status_text = st.empty()
+
+    # Results storage
+    all_predictions = []
+    all_probabilities = []
+
+    try:
+        for i, passage in enumerate(passages):
+            # Clean passage text
+            if passage is None or (isinstance(passage, float) and str(passage) == 'nan'):
+                passage = ""
+            passage = str(passage).strip()
+
+            # Run prediction
+            result = loader.predict_passage(
+                passage,
+                use_optimal_thresholds=use_optimal
+            )
+
+            all_predictions.append(result.get('predictions', {}))
+            all_probabilities.append(result.get('probabilities', {}))
+
+            # Update progress
+            if (i + 1) % batch_size == 0 or i == total - 1:
+                progress = (i + 1) / total
+                progress_bar.progress(progress, text=f"Processing {i+1}/{total} passages...")
+                status_text.text(f"Completed: {i+1}/{total}")
+
+        progress_bar.progress(1.0, text="✅ Complete!")
+        status_text.text(f"Processed all {total} passages")
+
+        # Build results DataFrame
+        st.markdown("---")
+        st.markdown("### 📊 Results")
+
+        # Create output DataFrame
+        result_df = df.copy()
+
+        # Add predicted labels (binary)
+        for label in label_columns:
+            pred_col = f"pred_{label}"
+            result_df[pred_col] = [
+                1 if preds.get(label, False) else 0
+                for preds in all_predictions
+            ]
+
+        # Add probabilities if requested
+        if include_probs:
+            for label in label_columns:
+                prob_col = f"prob_{label}"
+                result_df[prob_col] = [
+                    probs.get(label, 0.0)
+                    for probs in all_probabilities
+                ]
+
+        # Add predicted label list as string
+        result_df['predicted_labels'] = [
+            ", ".join([l for l, v in preds.items() if v])
+            for preds in all_predictions
+        ]
+
+        # Summary statistics
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            # Count passages with predictions
+            has_preds = sum(1 for preds in all_predictions if any(preds.values()))
+            st.metric("Passages with predictions", f"{has_preds:,} ({has_preds/total*100:.1f}%)")
+
+        with col2:
+            # Average predictions per passage
+            avg_preds = sum(sum(preds.values()) for preds in all_predictions) / total
+            st.metric("Avg labels per passage", f"{avg_preds:.2f}")
+
+        with col3:
+            # No predictions
+            no_preds = sum(1 for preds in all_predictions if not any(preds.values()))
+            st.metric("No predictions", f"{no_preds:,}")
+
+        # Label distribution
+        st.markdown("#### 📈 Predicted Label Distribution")
+
+        label_counts = []
+        for label in label_columns:
+            count = sum(1 for preds in all_predictions if preds.get(label, False))
+            pct = count / total * 100
+            label_counts.append({
+                'Label': label,
+                'Count': count,
+                'Percentage': f"{pct:.1f}%"
+            })
+
+        st.dataframe(
+            pd.DataFrame(label_counts),
+            hide_index=True,
+            use_container_width=True
+        )
+
+        # Preview results
+        st.markdown("#### 👀 Preview")
+
+        # Show sample with predictions
+        preview_cols = [passage_col, 'predicted_labels']
+        if include_probs:
+            # Add top probability columns
+            prob_cols = [f"prob_{l}" for l in label_columns[:3]]
+            preview_cols.extend([c for c in prob_cols if c in result_df.columns])
+
+        st.dataframe(
+            result_df[preview_cols].head(10),
+            hide_index=True,
+            use_container_width=True
+        )
+
+        # Store results in session state for download
+        st.session_state['batch_prediction_results'] = result_df
+
+        # Download button
+        st.markdown("---")
+        st.markdown("#### 💾 Export Results")
+
+        # Create Excel file in memory
+        from io import BytesIO
+
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            result_df.to_excel(writer, index=False, sheet_name='Predictions')
+
+        output.seek(0)
+
+        # Generate filename
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"predictions_{model_name}_{timestamp}.xlsx"
+
+        st.download_button(
+            label="📥 Download Predictions (Excel)",
+            data=output.getvalue(),
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        st.success(f"✅ Batch prediction complete! {total:,} passages processed.")
+
+    except Exception as e:
+        st.error(f"❌ Error during prediction: {e}")
+        import traceback
+        with st.expander("Error details"):
+            st.code(traceback.format_exc())
 
 
 # ============================================================================
@@ -242,6 +570,11 @@ def render_evaluation_section(manager: ModelManager):
 
             results = []
             for passage in passages:
+                # Clean passage text
+                if passage is None or (isinstance(passage, float) and str(passage) == 'nan'):
+                    passage = ""
+                passage = str(passage).strip()
+
                 result = loader.predict_passage(
                     passage,
                     use_optimal_thresholds=use_optimal
@@ -261,7 +594,6 @@ def render_evaluation_section(manager: ModelManager):
 
             # Calculate per-label metrics
             from sklearn.metrics import f1_score, precision_score, recall_score
-            import numpy as np
 
             metrics_data = []
             for label in label_columns:
@@ -287,46 +619,32 @@ def render_evaluation_section(manager: ModelManager):
             st.dataframe(
                 pd.DataFrame(metrics_data),
                 hide_index=True,
-                use_container_width=True
+                width='stretch'
             )
 
-            # Overall metrics - FIXED FOR MULTI-LABEL
+            # Overall metrics
             col1, col2, col3 = st.columns(3)
 
-            # Stack predictions into proper multi-label format (n_samples × n_labels)
-            y_true = np.array([actual_labels[label] for label in label_columns if label in actual_labels]).T
-            y_pred = np.array([predicted[label] for label in label_columns if label in actual_labels]).T
+            # Calculate overall
+            all_actual = []
+            all_pred = []
+            for label in label_columns:
+                if label in actual_labels:
+                    all_actual.extend(actual_labels[label])
+                    all_pred.extend(predicted[label])
 
-            # Calculate micro-averaged metrics (treats each label prediction equally)
-            overall_f1 = f1_score(y_true, y_pred, average='micro', zero_division=0)
-            overall_precision = precision_score(y_true, y_pred, average='micro', zero_division=0)
-            overall_recall = recall_score(y_true, y_pred, average='micro', zero_division=0)
-
-            with col1:
-                st.metric("F1 Micro", f"{overall_f1:.3f}")
-
-            with col2:
-                st.metric("Precision Micro", f"{overall_precision:.3f}")
-
-            with col3:
-                st.metric("Recall Micro", f"{overall_recall:.3f}")
-
-            # Also show macro for comparison
-            st.caption("---")
-            col1, col2, col3 = st.columns(3)
-
-            macro_f1 = f1_score(y_true, y_pred, average='macro', zero_division=0)
-            macro_precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
-            macro_recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
+            overall_f1 = f1_score(all_actual, all_pred, zero_division=0)
+            overall_precision = precision_score(all_actual, all_pred, zero_division=0)
+            overall_recall = recall_score(all_actual, all_pred, zero_division=0)
 
             with col1:
-                st.metric("F1 Macro", f"{macro_f1:.3f}")
+                st.metric("Overall F1", f"{overall_f1:.3f}")
 
             with col2:
-                st.metric("Precision Macro", f"{macro_precision:.3f}")
+                st.metric("Overall Precision", f"{overall_precision:.3f}")
 
             with col3:
-                st.metric("Recall Macro", f"{macro_recall:.3f}")
+                st.metric("Overall Recall", f"{overall_recall:.3f}")
 
 
 # ============================================================================
@@ -528,7 +846,7 @@ def render_comparison_section(manager: ModelManager):
                     return [''] * len(row)
 
             styled_df = comparison_df.style.apply(highlight_winner, axis=1)
-            st.dataframe(styled_df, hide_index=True, width='stretch')
+            st.dataframe(styled_df, hide_index=True, use_container_width=True)
 
             # Win/loss breakdown
             st.markdown("---")

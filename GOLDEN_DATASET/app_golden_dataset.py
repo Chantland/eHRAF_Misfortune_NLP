@@ -1,5 +1,10 @@
 """
-to run: streamlit run app_golden_dataset.py
+HRAF Golden Dataset Discovery - Main Application
+
+Simplified Architecture:
+- Sidebar: Select dataset + model (one click each)
+- Pages: Work with selected data/model
+- No complex pipeline required for basic usage
 """
 
 import streamlit as st
@@ -15,8 +20,8 @@ sys.path.insert(0, str(project_root))
 from page_views import data_page, models_page, discover_page
 
 # Import components
-from components.chat_assistant import GlobalChatAssistant
-from components.ui_helpers import render_sidebar_info, initialize_session_state
+from components.sidebar_selectors import render_sidebar_selectors, get_dataset_info
+from components.ui_helpers import initialize_session_state
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -35,83 +40,46 @@ st.set_page_config(
 
 initialize_session_state()
 
+
 # ============================================================================
-# SIDEBAR - GLOBAL CONTROLS
+# SIDEBAR - SIMPLE SELECTORS
 # ============================================================================
 
 with st.sidebar:
-    st.markdown("## 🔍 HRAF Dataset Tool")
-    st.caption("Explore • Prepare • Train • Discover")
+    st.markdown("## 🔍 HRAF Tool")
+
+    # Dataset and Model selectors
+    render_sidebar_selectors()
 
     st.markdown("---")
 
-    # Navigation - ADD ANALYSIS
-    st.markdown("### 📍 Navigation")
+    # Navigation
+    st.markdown("### 📍 Page")
 
     page = st.radio(
         "Go to:",
-        ["📊 Data", "🔬 Analysis", "🤖 Models", "🔍 Discover"],  # ADDED ANALYSIS
+        ["📊 Data", "🤖 Models", "🔍 Discover"],
         key="main_navigation",
         label_visibility="collapsed"
     )
 
-    st.markdown("---")
-    render_sidebar_info()
-
-    # ✅ ADD: Collapsible AI Assistant at bottom
-    st.markdown("---")
-
-    with st.expander("💬 AI Assistant", expanded=False):
-        if 'global_chat' not in st.session_state:
-            st.session_state.global_chat = GlobalChatAssistant()
-
-        st.session_state.global_chat.render(
-            current_page=page,
-            session_state=st.session_state
-        )
-
-# ============================================================================
-# GLOBAL CHAT ASSISTANT
-# ============================================================================
-
-# Initialize chat assistant (singleton pattern)
-if 'global_chat' not in st.session_state:
-    st.session_state.global_chat = GlobalChatAssistant()
-
-# Chat toggle in top right
-chat_col1, chat_col2 = st.columns([6, 1])
-
-with chat_col2:
-    show_chat = st.toggle(
-        "💬",
-        value=st.session_state.get('show_global_chat', False),
-        help="Toggle AI Assistant",
-        key="chat_toggle"
-    )
-    st.session_state.show_global_chat = show_chat
-
-# Render chat if enabled
-if show_chat:
-    with st.container():
-        st.markdown("### 💬 AI Assistant")
+    # Show current data info
+    info = get_dataset_info()
+    if info:
         st.markdown("---")
-        st.session_state.global_chat.render(
-            current_page=page,
-            session_state=st.session_state
-        )
-        st.markdown("---")
+        st.caption(f"**{info.get('name', 'Unknown')}**")
+        st.caption(f"{info.get('rows', 0):,} rows • {len(info.get('label_columns', []))} labels")
+        if info.get('prediction_mode'):
+            st.caption("🔮 Prediction mode")
+
 
 # ============================================================================
 # PAGE ROUTING
 # ============================================================================
 
-# Update routing section - ADD ANALYSIS CASE
+# Route to appropriate page
 if page == "📊 Data":
     data_page.render()
-
-elif page == "🔬 Analysis":  # NEW
-    from page_views import analysis_page
-    analysis_page.render()
 
 elif page == "🤖 Models":
     models_page.render()
