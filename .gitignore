@@ -31,3 +31,5 @@ temp
 GOLDEN_DATASET/ATT91541.env
 /HRAF_NLP/HRAF_MultiLabel_SubClasses_Kfolds/Model_9_JohnRoberta
 *.safetensors
+/_Extra folders not for repository
+Coding and Dataset/_README.txt
